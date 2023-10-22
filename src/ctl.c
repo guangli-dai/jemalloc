@@ -1146,10 +1146,12 @@ MUTEX_PROF_ARENA_MUTEXES
 #undef OP
 		if (!destroyed) {
 			sdstats->astats.base += astats->astats.base;
+#ifdef JEMALLOC_STATS
 			sdstats->astats.metadata_edata += astats->astats
 			    .metadata_edata;
 			sdstats->astats.metadata_rtree += astats->astats
 			    .metadata_rtree;
+#endif
 			sdstats->astats.resident += astats->astats.resident;
 			sdstats->astats.metadata_thp += astats->astats.metadata_thp;
 			ctl_accum_atomic_zu(&sdstats->astats.internal,
@@ -1353,10 +1355,15 @@ ctl_refresh(tsdn_t *tsdn) {
 		ctl_stats->metadata = ctl_sarena->astats->astats.base +
 		    atomic_load_zu(&ctl_sarena->astats->astats.internal,
 			ATOMIC_RELAXED);
+#ifdef JEMALLOC_STATS
 		ctl_stats->metadata_edata = ctl_sarena->astats->astats
 		    .metadata_edata;
 		ctl_stats->metadata_rtree = ctl_sarena->astats->astats
 		    .metadata_rtree;
+#else
+		ctl_stats->metadata_edata = 0;
+		ctl_stats->metadata_rtree = 0;
+#endif
 		ctl_stats->resident = ctl_sarena->astats->astats.resident;
 		ctl_stats->metadata_thp =
 		    ctl_sarena->astats->astats.metadata_thp;
@@ -3684,10 +3691,18 @@ CTL_RO_CGEN(config_stats, stats_arenas_i_base,
 CTL_RO_CGEN(config_stats, stats_arenas_i_internal,
     atomic_load_zu(&arenas_i(mib[2])->astats->astats.internal, ATOMIC_RELAXED),
     size_t)
+#ifdef JEMALLOC_STATS
 CTL_RO_CGEN(config_stats, stats_arenas_i_metadata_edata,
     arenas_i(mib[2])->astats->astats.metadata_edata, size_t)
 CTL_RO_CGEN(config_stats, stats_arenas_i_metadata_rtree,
     arenas_i(mib[2])->astats->astats.metadata_rtree, size_t)
+#else
+//TODO: this is for testing purposes only!!
+CTL_RO_CGEN(config_stats, stats_arenas_i_metadata_edata,
+    arenas_i(mib[2])->astats->astats.metadata_thp, size_t)
+CTL_RO_CGEN(config_stats, stats_arenas_i_metadata_rtree,
+    arenas_i(mib[2])->astats->astats.metadata_thp, size_t)
+#endif
 CTL_RO_CGEN(config_stats, stats_arenas_i_metadata_thp,
     arenas_i(mib[2])->astats->astats.metadata_thp, size_t)
 CTL_RO_CGEN(config_stats, stats_arenas_i_tcache_bytes,
