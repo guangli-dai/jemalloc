@@ -47,6 +47,7 @@ struct arena_s {
 	/* Synchronization: internal. */
 	arena_stats_t		stats;
 
+	char padding[48];
 	/*
 	 * Lists of tcaches and cache_bin_array_descriptors for extant threads
 	 * associated with this arena.  Stats from these are merged
