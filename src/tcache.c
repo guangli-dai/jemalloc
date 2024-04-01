@@ -471,7 +471,7 @@ tcache_bin_flush_impl(tsd_t *tsd, tcache_t *tcache, cache_bin_t *cache_bin,
 				}
 			} else {
 				if (large_dalloc_safety_checks(edata, ptr,
-				    binind)) {
+				    sz_index2size(binind))) {
 					/* See the comment in isfree. */
 					continue;
 				}
