@@ -425,8 +425,9 @@ maybe_check_alloc_ctx(tsd_t *tsd, void *ptr, emap_alloc_ctx_t *alloc_ctx) {
                 if (alloc_ctx->szind != dbg_ctx.szind) {
                         safety_check_fail_sized_dealloc(
                             /* current_dealloc */ true, ptr,
-                            /* true_size */ sz_index2size(dbg_ctx.szind),
-                            /* input_size */ sz_index2size(alloc_ctx->szind));
+                            /* true_size */ emap_alloc_ctx_usize_get(&dbg_ctx),
+                            /* input_size */ emap_alloc_ctx_usize_get(
+                            alloc_ctx));
                         return true;
                 }
                 if (alloc_ctx->slab != dbg_ctx.slab) {
@@ -536,6 +537,9 @@ bool free_fastpath(void *ptr, size_t size, bool size_hint) {
         uint64_t deallocated, threshold;
         te_free_fastpath_ctx(tsd, &deallocated, &threshold);
 
+#    ifdef LIMIT_USIZE_GAP
+        alloc_ctx.usize = usize;
+#    endif
         uint64_t deallocated_after = deallocated + usize;
         /*
          * Check for events and tsd non-nominal (fast_threshold will be set to
