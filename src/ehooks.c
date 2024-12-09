@@ -53,7 +53,7 @@ ehooks_default_alloc_impl(tsdn_t *tsdn, void *new_addr, size_t size,
     size_t alignment, bool *zero, bool *commit, unsigned arena_ind) {
 	arena_t *arena = arena_get(tsdn, arena_ind, false);
 	/* NULL arena indicates arena_create. */
-	assert(arena != NULL || alignment == HUGEPAGE);
+	assert(arena != NULL || alignment == BASE_BLOCK_MIN_ALIGN);
 	dss_prec_t dss = (arena == NULL) ? dss_prec_disabled :
 	    (dss_prec_t)atomic_load_u(&arena->dss_prec, ATOMIC_RELAXED);
 	void *ret = extent_alloc_core(tsdn, arena, new_addr, size, alignment,
