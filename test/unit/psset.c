@@ -120,6 +120,7 @@ edata_expect(edata_t *edata, size_t page_offset, size_t page_cnt) {
 }
 
 TEST_BEGIN(test_empty) {
+	test_skip_if(hpa_hugepage_size_exceeds_limit());
 	bool err;
 	hpdata_t pageslab;
 	hpdata_init(&pageslab, PAGESLAB_ADDR, PAGESLAB_AGE);
@@ -137,6 +138,7 @@ TEST_BEGIN(test_empty) {
 TEST_END
 
 TEST_BEGIN(test_fill) {
+	test_skip_if(hpa_hugepage_size_exceeds_limit());
 	bool err;
 
 	hpdata_t pageslab;
@@ -169,6 +171,7 @@ TEST_BEGIN(test_fill) {
 TEST_END
 
 TEST_BEGIN(test_reuse) {
+	test_skip_if(hpa_hugepage_size_exceeds_limit());
 	bool err;
 	hpdata_t *ps;
 
@@ -261,6 +264,7 @@ TEST_BEGIN(test_reuse) {
 TEST_END
 
 TEST_BEGIN(test_evict) {
+	test_skip_if(hpa_hugepage_size_exceeds_limit());
 	bool err;
 	hpdata_t *ps;
 
@@ -295,6 +299,7 @@ TEST_BEGIN(test_evict) {
 TEST_END
 
 TEST_BEGIN(test_multi_pageslab) {
+	test_skip_if(hpa_hugepage_size_exceeds_limit());
 	bool err;
 	hpdata_t *ps;
 
@@ -420,6 +425,7 @@ TEST_END
 
 TEST_BEGIN(test_stats_huge) {
 	test_skip_if(!config_stats);
+	test_skip_if(hpa_hugepage_size_exceeds_limit());
 
 	hpdata_t pageslab;
 	hpdata_init(&pageslab, PAGESLAB_ADDR, PAGESLAB_AGE);
@@ -542,6 +548,7 @@ stats_expect(psset_t *psset, size_t nactive) {
 
 TEST_BEGIN(test_stats_fullness) {
 	test_skip_if(!config_stats);
+	test_skip_if(hpa_hugepage_size_exceeds_limit());
 
 	bool err;
 
@@ -637,6 +644,7 @@ init_test_pageslabs(psset_t *psset, hpdata_t *pageslab,
 }
 
 TEST_BEGIN(test_oldest_fit) {
+	test_skip_if(hpa_hugepage_size_exceeds_limit());
 	bool err;
 	edata_t alloc[HUGEPAGE_PAGES];
 	edata_t worse_alloc[HUGEPAGE_PAGES];
@@ -660,6 +668,7 @@ TEST_BEGIN(test_oldest_fit) {
 TEST_END
 
 TEST_BEGIN(test_insert_remove) {
+	test_skip_if(hpa_hugepage_size_exceeds_limit());
 	bool err;
 	hpdata_t *ps;
 	edata_t alloc[HUGEPAGE_PAGES];
@@ -706,6 +715,7 @@ TEST_BEGIN(test_insert_remove) {
 TEST_END
 
 TEST_BEGIN(test_purge_prefers_nonhuge) {
+	test_skip_if(hpa_hugepage_size_exceeds_limit());
 	/*
 	 * All else being equal, we should prefer purging non-huge pages over
 	 * huge ones for non-empty extents.
@@ -789,6 +799,7 @@ TEST_BEGIN(test_purge_prefers_nonhuge) {
 TEST_END
 
 TEST_BEGIN(test_purge_prefers_empty) {
+	test_skip_if(hpa_hugepage_size_exceeds_limit());
 	void *ptr;
 
 	psset_t psset;
@@ -825,6 +836,7 @@ TEST_BEGIN(test_purge_prefers_empty) {
 TEST_END
 
 TEST_BEGIN(test_purge_prefers_empty_huge) {
+	test_skip_if(hpa_hugepage_size_exceeds_limit());
 	void *ptr;
 
 	psset_t psset;

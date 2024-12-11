@@ -25,6 +25,11 @@ static void hpa_dalloc_batch(tsdn_t *tsdn, pai_t *self,
 static uint64_t hpa_time_until_deferred_work(tsdn_t *tsdn, pai_t *self);
 
 bool
+hpa_hugepage_size_exceeds_limit() {
+	return HUGEPAGE > HUGEPAGE_MAX_EXPECTED_SIZE;
+}
+
+bool
 hpa_supported(void) {
 #ifdef _WIN32
 	/*
@@ -52,7 +57,7 @@ hpa_supported(void) {
 		return false;
 	}
 	/* As mentioned in pages.h, do not support If HUGEPAGE is too large. */
-	if (HUGEPAGE > HUGEPAGE_MAX_EXPECTED_SIZE) {
+	if (hpa_hugepage_size_exceeds_limit()) {
 		return false;
 	}
 	return true;
