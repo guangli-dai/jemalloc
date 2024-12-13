@@ -96,6 +96,15 @@ class Option(object):
         return (isinstance(obj, Option) and obj.type == self.type
                 and obj.value == self.value)
 
+    def __repr__(self):
+        type_names = {
+            Option.Type.COMPILER: 'COMPILER',
+            Option.Type.COMPILER_FLAG: 'COMPILER_FLAG',
+            Option.Type.CONFIGURE_FLAG: 'CONFIGURE_FLAG',
+            Option.Type.MALLOC_CONF: 'MALLOC_CONF',
+            Option.Type.FEATURE: 'FEATURE'
+        }
+        return f"Option({type_names[self.type]}, {repr(self.value)})"
 
 # The 'default' configuration is gcc, on linux, with no compiler or configure
 # flags.  We also test with clang, -m32, --enable-debug, --enable-prof,
@@ -125,7 +134,9 @@ configure_flag_unusuals = [Option.as_configure_flag(opt) for opt in (
     '--disable-libdl',
     '--enable-opt-safety-checks',
     '--with-lg-page=16',
+    '--with-lg-page=16 --with-lg-hugepage=29',
 )]
+LARGE_HUGEPAGE = Option.as_configure_flag("--with-lg-page=16 --with-lg-hugepage=29")
 
 
 malloc_conf_unusuals = [Option.as_malloc_conf(opt) for opt in (
@@ -250,6 +261,9 @@ def generate_linux(arch):
         # Avoid 32 bit build on ARM64
         exclude = (CROSS_COMPILE_32BIT,)
 
+    if arch != ARM64:
+        exclude += [LARGE_HUGEPAGE]
+
     return generate_jobs(os, arch, exclude, max_unusual_opts)
 
 
@@ -263,6 +277,9 @@ def generate_macos(arch):
             'background_thread:true')] +
         [Option.as_configure_flag('--enable-prof')] +
         [CLANG,])
+
+    if arch != ARM64:
+        exclude += [LARGE_HUGEPAGE]
 
     return generate_jobs(os, arch, exclude, max_unusual_opts)
 
