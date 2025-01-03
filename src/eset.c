@@ -4,7 +4,7 @@
 #include "jemalloc/internal/eset.h"
 
 #define ESET_NPSIZES (SC_NPSIZES + 1)
-#define ESET_ENUMERATE_NUM 32
+#define ESET_ENUMERATE_NUM 1
 
 static void
 eset_bin_init(eset_bin_t *bin) {
@@ -200,7 +200,14 @@ eset_enumerate_search(eset_t *eset, size_t size, pszind_t bin_ind,
 	if (edata_heap_empty(&eset->bins[bin_ind].heap)) {
 		return NULL;
 	}
-
+	edata_t *ret = NULL;
+	ret = edata_heap_first(&eset->bins[bin_ind].heap);
+	if (edata_size_get(ret) >= size) {
+		*ret_summ = edata_cmp_summary_get(ret);
+		return ret;
+	}
+	return NULL;
+/*
 	void *bfs_queue[ESET_ENUMERATE_NUM];
 	uint16_t front, rear;
 	size_t queue_size, visited_num;
@@ -223,6 +230,7 @@ eset_enumerate_search(eset_t *eset, size_t size, pszind_t bin_ind,
 	}
 
 	return ret;
+*/
 }
 #endif
 
@@ -248,6 +256,9 @@ eset_first_fit(eset_t *eset, size_t size, bool exact_only,
 
 	if (size >= SC_LARGE_MINCLASS && pind != pind_in) {
 		ret = eset_enumerate_search(eset, size, pind_in, &ret_summ);
+	}
+	if (ret != NULL) {
+		return ret;
 	}
 #endif
 
