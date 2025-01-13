@@ -156,26 +156,27 @@ eset_remove(eset_t *eset, edata_t *edata) {
 	    cur_extents_npages - (size >> LG_PAGE), ATOMIC_RELAXED);
 }
 
-/*
- * Find an extent with size [min_size, max_size) to satisfy the alignment
- * requirement.  For each size, try only the first extent in the heap.
- */
-static edata_t *
-eset_fit_alignment(eset_t *eset, size_t min_size, size_t max_size,
+#ifdef LIMIT_USIZE_GAP
+edata_t *
+eset_enumerate_alignment_search(eset_t *eset, size_t size, pszind_t bin_ind,
     size_t alignment) {
-        pszind_t pind = sz_psz2ind(sz_psz_quantize_ceil(min_size));
-        pszind_t pind_max = sz_psz2ind(sz_psz_quantize_ceil(max_size));
+	if (edata_heap_empty(&eset->bins[bin_ind].heap)) {
+		return NULL;
+	}
 
-	for (pszind_t i =
-	    (pszind_t)fb_ffs(eset->bitmap, ESET_NPSIZES, (size_t)pind);
-	    i < pind_max;
-	    i = (pszind_t)fb_ffs(eset->bitmap, ESET_NPSIZES, (size_t)i + 1)) {
-		assert(i < SC_NPSIZES);
-		assert(!edata_heap_empty(&eset->bins[i].heap));
-		edata_t *edata = edata_heap_first(&eset->bins[i].heap);
+	void *bfs_queue[ESET_ENUMERATE_NUM];
+	uint16_t front, rear;
+	size_t queue_size, visited_num;
+	edata_t *edata = NULL;
+	edata_heap_enumerate_prepare(&eset->bins[bin_ind].heap, bfs_queue,
+	    &front, &rear, &queue_size, &visited_num, ESET_ENUMERATE_NUM);
+	while ((edata =
+	    edata_heap_enumerate_next(&eset->bins[bin_ind].heap, bfs_queue,
+	    &front, &rear, &queue_size, &visited_num, ESET_ENUMERATE_NUM,
+	    ESET_ENUMERATE_NUM))) {
 		uintptr_t base = (uintptr_t)edata_base_get(edata);
 		size_t candidate_size = edata_size_get(edata);
-		assert(candidate_size >= min_size);
+		assert(candidate_size >= size);
 
 		uintptr_t next_align = ALIGNMENT_CEILING((uintptr_t)base,
 		    PAGE_CEILING(alignment));
@@ -185,7 +186,7 @@ eset_fit_alignment(eset_t *eset, size_t min_size, size_t max_size,
 		}
 
 		size_t leadsize = next_align - base;
-		if (candidate_size - leadsize >= min_size) {
+		if (candidate_size - leadsize >= size) {
 			return edata;
 		}
 	}
@@ -193,7 +194,6 @@ eset_fit_alignment(eset_t *eset, size_t min_size, size_t max_size,
 	return NULL;
 }
 
-#ifdef LIMIT_USIZE_GAP
 edata_t *
 eset_enumerate_search(eset_t *eset, size_t size, pszind_t bin_ind,
     edata_cmp_summary_t *ret_summ) {
@@ -225,6 +225,55 @@ eset_enumerate_search(eset_t *eset, size_t size, pszind_t bin_ind,
 	return ret;
 }
 #endif
+
+/*
+ * Find an extent with size [min_size, max_size) to satisfy the alignment
+ * requirement.  For each size, try only the first extent in the heap.
+ */
+static edata_t *
+eset_fit_alignment(eset_t *eset, size_t min_size, size_t max_size,
+    size_t alignment) {
+        pszind_t pind = sz_psz2ind(sz_psz_quantize_ceil(min_size));
+        pszind_t pind_max = sz_psz2ind(sz_psz_quantize_ceil(max_size));
+#ifdef LIMIT_USIZEGAP
+	pszind_t pind_in = sz_psz2ind(sz_psz_quantize_floor(size));
+	edata_cmp_summary_t ret_summ JEMALLOC_CC_SILENCE_INIT({0});
+
+	if (size >= SC_LARGE_MINCLASS && pind != pind_in) {
+		edata_t *ret = NULL;
+		ret = eset_enumerate_alignment_search(eset, min_size, pind_in, alignment);
+		if (ret != NULL) {
+			return ret;
+		}
+	}
+#endif
+
+	for (pszind_t i =
+	    (pszind_t)fb_ffs(eset->bitmap, ESET_NPSIZES, (size_t)pind);
+	    i < pind_max;
+	    i = (pszind_t)fb_ffs(eset->bitmap, ESET_NPSIZES, (size_t)i + 1)) {
+		assert(i < SC_NPSIZES);
+		assert(!edata_heap_empty(&eset->bins[i].heap));
+		edata_t *edata = edata_heap_first(&eset->bins[i].heap);
+		uintptr_t base = (uintptr_t)edata_base_get(edata);
+		size_t candidate_size = edata_size_get(edata);
+		assert(candidate_size >= min_size);
+
+		uintptr_t next_align = ALIGNMENT_CEILING((uintptr_t)base,
+		    PAGE_CEILING(alignment));
+		if (base > next_align || base + candidate_size <= next_align) {
+			/* Overflow or not crossing the next alignment. */
+			continue;
+		}
+
+		size_t leadsize = next_align - base;
+		if (candidate_size - leadsize >= min_size) {
+			return edata;
+		}
+	}
+
+	return NULL;
+}
 
 /*
  * Do first-fit extent selection, i.e. select the oldest/lowest extent that is

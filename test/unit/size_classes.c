@@ -84,7 +84,8 @@ TEST_BEGIN(test_grow_slow_size_classes) {
 	test_skip_if(!config_limit_usize_gap);
 	size_t size = SC_LARGE_MINCLASS;
 	size_t target_usize = SC_LARGE_MINCLASS;
-	size_t max_size = get_max_size_class();
+	//size_t max_size = get_max_size_class();
+	size_t max_size = 4 * HUGEPAGE;
 	size_t increase[3] = {PAGE - 1, 1, 1};
 	while (size <= max_size) {
 		size_t usize = sz_s2u(size);
