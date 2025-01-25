@@ -196,7 +196,7 @@ eset_enumerate_alignment_search(eset_t *eset, size_t size, pszind_t bin_ind,
 
 edata_t *
 eset_enumerate_search(eset_t *eset, size_t size, pszind_t bin_ind,
-    edata_cmp_summary_t *ret_summ) {
+    bool exact_only, edata_cmp_summary_t *ret_summ) {
 	if (edata_heap_empty(&eset->bins[bin_ind].heap)) {
 		return NULL;
 	}
@@ -211,7 +211,8 @@ eset_enumerate_search(eset_t *eset, size_t size, pszind_t bin_ind,
 	    edata_heap_enumerate_next(&eset->bins[bin_ind].heap, bfs_queue,
 	    &front, &rear, &queue_size, &visited_num, ESET_ENUMERATE_NUM,
 	    ESET_ENUMERATE_NUM))) {
-		if (edata_size_get(edata) >= size) {
+		if ((!exact_only && edata_size_get(edata) >= size) ||
+		    (exact_only && edata_size_get(edata) == size)) {
 			edata_cmp_summary_t temp_summ =
 			    edata_cmp_summary_get(edata);
 			if (ret == NULL || edata_cmp_summary_comp(temp_summ,
@@ -292,18 +293,25 @@ eset_first_fit(eset_t *eset, size_t size, bool exact_only,
 	edata_cmp_summary_t ret_summ JEMALLOC_CC_SILENCE_INIT({0});
 
 	pszind_t pind = sz_psz2ind(sz_psz_quantize_ceil(size));
+
+	if (exact_only) {
+#ifdef LIMIT_USIZE_GAP
+		pszind_t pind_in = sz_psz2ind(sz_psz_quantize_floor(size));
+		return eset_enumerate_search(eset, size, pind_in,
+		    /* exact_only */ true, &ret_summ);
+#endif
+		return edata_heap_empty(&eset->bins[pind].heap) ? NULL :
+		    edata_heap_first(&eset->bins[pind].heap);
+	}
+
 #ifdef LIMIT_USIZE_GAP
 	pszind_t pind_in = sz_psz2ind(sz_psz_quantize_floor(size));
 
 	if (size >= SC_LARGE_MINCLASS && pind != pind_in) {
-		ret = eset_enumerate_search(eset, size, pind_in, &ret_summ);
+		ret = eset_enumerate_search(eset, size, pind_in,
+		    /* exact_only */ false, &ret_summ);
 	}
 #endif
-
-	if (exact_only) {
-		return edata_heap_empty(&eset->bins[pind].heap) ? NULL :
-		    edata_heap_first(&eset->bins[pind].heap);
-	}
 
 	for (pszind_t i =
 	    (pszind_t)fb_ffs(eset->bitmap, ESET_NPSIZES, (size_t)pind);
