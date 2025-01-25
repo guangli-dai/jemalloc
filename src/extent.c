@@ -527,6 +527,23 @@ extent_split_interior(tsdn_t *tsdn, pac_t *pac, ehooks_t *ehooks,
 	return extent_split_interior_ok;
 }
 
+size_t
+extent_caching_size(size_t size) {
+	if (size < USIZE_GROW_SLOW_THRESHOLD) {
+		return size * opt_lg_extent_max_active_fit;
+	}
+	/*
+	size_t x = lg_floor((size<<1)-1);
+	size_t lg_delta = (x < SC_LG_NGROUP + LG_QUANTUM + 1)
+	    ?  LG_QUANTUM : x - SC_LG_NGROUP - 1;
+	size_t delta = ZU(1) << lg_delta;
+	size_t delta_mask = delta - 1;
+	size_t caching_size = (size + delta_mask) & ~delta_mask;
+	*/
+	return size + (size >> 2);
+	//return caching_size;
+}
+
 /*
  * This fulfills the indicated allocation request out of the given extent (which
  * the caller should have ensured was big enough).  If there's any unused space
@@ -566,13 +583,25 @@ extent_recycle_split(tsdn_t *tsdn, pac_t *pac, ehooks_t *ehooks,
 			/*
 			 * When growing_retained, pass lead and trail out so
 			 * that they could be put into the dirty pool for
-			 * better reuse.
+			 * better reuse.  However, to avoid aggressive caching,
+			 * calculate the maximum caching size and put lead or
+			 * trail into the dirty pool only when not exceeding
+			 * the size.
 			 */
 			assert(lead_ptr != NULL && trail_ptr != NULL);
 			assert(ecache->state == extent_state_retained);
-			*lead_ptr = lead;
-			*trail_ptr = trail;
-			return edata;
+			size_t caching_size = extent_caching_size(size) - size;
+			if (lead != NULL && edata_size_get(lead)
+			    <= caching_size) {
+				caching_size -= edata_size_get(lead);
+				*lead_ptr = lead;
+				lead = NULL;
+			}
+			if (trail != NULL && edata_size_get(trail)
+			    <= caching_size) {
+				*trail_ptr = trail;
+				trail = NULL;
+			}
 		}
 		if (lead != NULL) {
 			extent_deactivate_locked(tsdn, pac, ecache, lead);
@@ -789,7 +818,7 @@ label_err:
 	return NULL;
 }
 
-static void
+void
 extent_move_retained_to_dirty(tsdn_t *tsdn, pac_t *pac, ehooks_t *ehooks,
     edata_t *edata) {
 	assert(edata != NULL);
