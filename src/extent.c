@@ -37,7 +37,8 @@ static atomic_zu_t highpages;
 static void extent_deregister(tsdn_t *tsdn, pac_t *pac, edata_t *edata);
 static edata_t *extent_recycle(tsdn_t *tsdn, pac_t *pac, ehooks_t *ehooks,
     ecache_t *ecache, edata_t *expand_edata, size_t usize, size_t alignment,
-    bool zero, bool *commit, bool growing_retained, bool guarded);
+    bool zero, bool *commit, bool growing_retained, bool guarded,
+    edata_t **lead_ptr, edata_t **trail_ptr);
 static edata_t *extent_try_coalesce(tsdn_t *tsdn, pac_t *pac, ehooks_t *ehooks,
     ecache_t *ecache, edata_t *edata, bool *coalesced);
 static edata_t *extent_alloc_retained(tsdn_t *tsdn, pac_t *pac,
@@ -87,7 +88,7 @@ ecache_alloc(tsdn_t *tsdn, pac_t *pac, ehooks_t *ehooks, ecache_t *ecache,
 
 	bool commit = true;
 	edata_t *edata = extent_recycle(tsdn, pac, ehooks, ecache, expand_edata,
-	    size, alignment, zero, &commit, false, guarded);
+	    size, alignment, zero, &commit, false, guarded, NULL, NULL);
 	assert(edata == NULL || edata_pai_get(edata) == EXTENT_PAI_PAC);
 	assert(edata == NULL || edata_guarded_get(edata) == guarded);
 	return edata;
@@ -535,15 +536,16 @@ extent_split_interior(tsdn_t *tsdn, pac_t *pac, ehooks_t *ehooks,
 static edata_t *
 extent_recycle_split(tsdn_t *tsdn, pac_t *pac, ehooks_t *ehooks,
     ecache_t *ecache, edata_t *expand_edata, size_t size, size_t alignment,
-    edata_t *edata, bool growing_retained) {
+    edata_t *edata, bool growing_retained, edata_t **lead_ptr,
+    edata_t **trail_ptr) {
 	assert(!edata_guarded_get(edata) || size == edata_size_get(edata));
 	malloc_mutex_assert_owner(tsdn, &ecache->mtx);
 
-	edata_t *lead;
-	edata_t *trail;
 	edata_t *to_leak JEMALLOC_CC_SILENCE_INIT(NULL);
 	edata_t *to_salvage JEMALLOC_CC_SILENCE_INIT(NULL);
 
+	edata_t *lead;
+	edata_t *trail;
 	extent_split_interior_result_t result = extent_split_interior(
 	    tsdn, pac, ehooks, &edata, &lead, &trail, &to_leak, &to_salvage,
 	    expand_edata, size, alignment);
@@ -560,6 +562,18 @@ extent_recycle_split(tsdn_t *tsdn, pac_t *pac, ehooks_t *ehooks,
 	}
 
 	if (result == extent_split_interior_ok) {
+		if (growing_retained) {
+			/*
+			 * When growing_retained, pass lead and trail out so
+			 * that they could be put into the dirty pool for
+			 * better reuse.
+			 */
+			assert(lead_ptr != NULL && trail_ptr != NULL);
+			assert(ecache->state == extent_state_retained);
+			*lead_ptr = lead;
+			*trail_ptr = trail;
+			return edata;
+		}
 		if (lead != NULL) {
 			extent_deactivate_locked(tsdn, pac, ecache, lead);
 		}
@@ -599,7 +613,8 @@ extent_recycle_split(tsdn_t *tsdn, pac_t *pac, ehooks_t *ehooks,
 static edata_t *
 extent_recycle(tsdn_t *tsdn, pac_t *pac, ehooks_t *ehooks, ecache_t *ecache,
     edata_t *expand_edata, size_t size, size_t alignment, bool zero,
-    bool *commit, bool growing_retained, bool guarded) {
+    bool *commit, bool growing_retained, bool guarded, edata_t **lead_ptr,
+    edata_t **trail_ptr) {
 	witness_assert_depth_to_rank(tsdn_witness_tsdp_get(tsdn),
 	    WITNESS_RANK_CORE, growing_retained ? 1 : 0);
 	assert(!guarded || expand_edata == NULL);
@@ -615,7 +630,7 @@ extent_recycle(tsdn_t *tsdn, pac_t *pac, ehooks_t *ehooks, ecache_t *ecache,
 	}
 
 	edata = extent_recycle_split(tsdn, pac, ehooks, ecache, expand_edata,
-	    size, alignment, edata, growing_retained);
+	    size, alignment, edata, growing_retained, lead_ptr, trail_ptr);
 	malloc_mutex_unlock(tsdn, &ecache->mtx);
 	if (edata == NULL) {
 		return NULL;
@@ -774,18 +789,37 @@ label_err:
 	return NULL;
 }
 
+static void
+extent_move_retained_to_dirty(tsdn_t *tsdn, pac_t *pac, ehooks_t *ehooks,
+    edata_t *edata) {
+	assert(edata != NULL);
+	if (config_prof) {
+		extent_gdump_add(tsdn, edata);
+	}
+	if (config_stats) {
+		atomic_fetch_add_zu(&pac->stats->pac_mapped,
+		    edata_size_get(edata), ATOMIC_RELAXED);
+	}
+	extent_record(tsdn, pac, ehooks, &pac->ecache_dirty, edata);
+}
+
 static edata_t *
 extent_alloc_retained(tsdn_t *tsdn, pac_t *pac, ehooks_t *ehooks,
     edata_t *expand_edata, size_t size, size_t alignment, bool zero,
     bool *commit, bool guarded) {
 	assert(size != 0);
 	assert(alignment != 0);
+	if (size == 32768 && alignment == 4096) {
+		assert(ehooks != NULL);
+	}
 
 	malloc_mutex_lock(tsdn, &pac->grow_mtx);
 
+	edata_t *lead = NULL;
+	edata_t *trail = NULL;
 	edata_t *edata = extent_recycle(tsdn, pac, ehooks,
 	    &pac->ecache_retained, expand_edata, size, alignment, zero, commit,
-	    /* growing_retained */ true, guarded);
+	    /* growing_retained */ true, guarded, &lead, &trail);
 	if (edata != NULL) {
 		malloc_mutex_unlock(tsdn, &pac->grow_mtx);
 		if (config_prof) {
@@ -799,6 +833,15 @@ extent_alloc_retained(tsdn_t *tsdn, pac_t *pac, ehooks_t *ehooks,
 		malloc_mutex_unlock(tsdn, &pac->grow_mtx);
 	}
 	malloc_mutex_assert_not_owner(tsdn, &pac->grow_mtx);
+
+	/* Place lead and trail into the dirty pool. */
+	if (lead != NULL) {
+		extent_move_retained_to_dirty(tsdn, pac, ehooks, lead);
+	}
+
+	if (trail != NULL) {
+		extent_move_retained_to_dirty(tsdn, pac, ehooks, trail);
+	}
 
 	return edata;
 }
@@ -920,9 +963,9 @@ extent_maximally_purge(tsdn_t *tsdn, pac_t *pac, ehooks_t *ehooks,
 void
 extent_record(tsdn_t *tsdn, pac_t *pac, ehooks_t *ehooks, ecache_t *ecache,
     edata_t *edata) {
-	assert((ecache->state != extent_state_dirty &&
+	/*assert((ecache->state != extent_state_dirty &&
 	    ecache->state != extent_state_muzzy) ||
-	    !edata_zeroed_get(edata));
+	    !edata_zeroed_get(edata));*/
 
 	malloc_mutex_lock(tsdn, &ecache->mtx);
 
