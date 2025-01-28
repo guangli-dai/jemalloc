@@ -114,6 +114,7 @@ verify_pmuzzy(unsigned arena_ind, uint64_t expected) {
 }
 
 TEST_BEGIN(test_guarded_decay) {
+	test_skip_if(config_limit_usize_gap);
 	unsigned arena_ind = do_arena_create(-1, -1);
 	do_decay(arena_ind);
 	do_purge(arena_ind);

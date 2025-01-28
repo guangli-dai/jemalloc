@@ -112,6 +112,24 @@ pac_may_have_muzzy(pac_t *pac) {
 	return pac_decay_ms_get(pac, extent_state_muzzy) != 0;
 }
 
+size_t pac_batched_alloc_retained_size(size_t size) {
+	if (size > SC_LARGE_MAXCLASS) {
+		return size;
+	}
+	size_t x = lg_floor((size<<1)-1);
+	size_t lg_delta = (x < SC_LG_NGROUP + LG_QUANTUM + 1)
+	    ?  LG_QUANTUM : x - SC_LG_NGROUP - 1;
+	size_t delta = ZU(1) << lg_delta;
+	size_t delta_mask = delta - 1;
+	size_t caching_size = (size + delta_mask) & ~delta_mask;
+	size_t capped_size = ((size + HUGEPAGE - 1) >> LG_HUGEPAGE)
+	    << LG_HUGEPAGE;
+	if (caching_size >= capped_size) {
+		caching_size = capped_size;
+	}
+	return caching_size;
+}
+
 static edata_t *
 pac_alloc_real(tsdn_t *tsdn, pac_t *pac, ehooks_t *ehooks, size_t size,
     size_t alignment, bool zero, bool guarded) {
@@ -125,12 +143,45 @@ pac_alloc_real(tsdn_t *tsdn, pac_t *pac, ehooks_t *ehooks, size_t size,
 		    NULL, size, alignment, zero, guarded);
 	}
 	if (edata == NULL) {
-		edata = ecache_alloc_grow(tsdn, pac, ehooks,
-		    &pac->ecache_retained, NULL, size, alignment, zero,
-		    guarded);
-		if (config_stats && edata != NULL) {
-			atomic_fetch_add_zu(&pac->stats->pac_mapped, size,
-			    ATOMIC_RELAXED);
+		/*
+		 * Split is not supported when (!map_coalesce && !opt_retain).
+		 * Do not try to bump the size for this case.
+		 */
+		if (config_limit_usize_gap && (maps_coalesce || opt_retain)) {
+			size_t caching_size = pac_batched_alloc_retained_size(
+			    size);
+			edata = ecache_alloc_grow(tsdn, pac, ehooks,
+			    &pac->ecache_retained, NULL, caching_size,
+			    alignment, zero, guarded);
+
+			if (edata != NULL && caching_size > size) {
+				edata_t *trail = extent_split_wrapper(tsdn, pac,
+				    ehooks, edata, size, caching_size - size,
+				    /* holding_core_locks */ false);
+				if (trail == NULL) {
+					ecache_dalloc(tsdn, pac, ehooks,
+					    &pac->ecache_retained, edata);
+					edata = NULL;
+				} else {
+					ecache_dalloc(tsdn, pac, ehooks,
+					    &pac->ecache_dirty, trail);
+				}
+			}
+
+			if (config_stats && edata != NULL) {
+				atomic_fetch_add_zu(&pac->stats->pac_mapped,
+				    caching_size, ATOMIC_RELAXED);
+			}
+		}
+
+		if (edata == NULL) {
+			edata = ecache_alloc_grow(tsdn, pac, ehooks,
+			    &pac->ecache_retained, NULL, size, alignment, zero,
+			    guarded);
+			if (config_stats && edata != NULL) {
+				atomic_fetch_add_zu(&pac->stats->pac_mapped,
+				    size, ATOMIC_RELAXED);
+			}
 		}
 	}
 
