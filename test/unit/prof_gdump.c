@@ -37,7 +37,12 @@ TEST_BEGIN(test_gdump) {
 	expect_true(did_prof_dump_open, "Expected a profile dump");
 
 	did_prof_dump_open = false;
-	q = mallocx((1U << SC_LG_LARGE_MINCLASS), 0);
+	/*
+	 * Due to more extents cached in the dirty pool, need to allocate
+	 * something larger tha previous size << opt_lg_extent_max_active_fit.
+	 */
+	q = mallocx(((1U << SC_LG_LARGE_MINCLASS)
+	    << opt_lg_extent_max_active_fit) + 1, 0);
 	expect_ptr_not_null(q, "Unexpected mallocx() failure");
 	expect_true(did_prof_dump_open, "Expected a profile dump");
 
@@ -59,7 +64,8 @@ TEST_BEGIN(test_gdump) {
 	    "Unexpected mallctl failure while enabling prof.gdump");
 	assert(!gdump_old);
 	did_prof_dump_open = false;
-	s = mallocx((1U << SC_LG_LARGE_MINCLASS), 0);
+	s = mallocx(((1U << SC_LG_LARGE_MINCLASS)
+	    << opt_lg_extent_max_active_fit) + 1, 0);
 	expect_ptr_not_null(q, "Unexpected mallocx() failure");
 	expect_true(did_prof_dump_open, "Expected a profile dump");
 

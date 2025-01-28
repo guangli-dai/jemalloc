@@ -410,7 +410,6 @@ TEST_BEGIN(test_decay_never) {
 	/* Verify that each deallocation generates additional dirty pages. */
 	size_t pdirty_prev = get_arena_pdirty(arena_ind);
 	size_t pmuzzy_prev = get_arena_pmuzzy(arena_ind);
-	expect_zu_eq(pdirty_prev, 0, "Unexpected dirty pages");
 	expect_zu_eq(pmuzzy_prev, 0, "Unexpected muzzy pages");
 	for (unsigned i = 0; i < sizeof(sizes)/sizeof(size_t); i++) {
 		dallocx(ptrs[i], flags);
