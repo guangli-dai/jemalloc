@@ -46,6 +46,7 @@ LIBPREFIX := @libprefix@
 REV := @rev@
 install_suffix := @install_suffix@
 ABI := @abi@
+OS_LAYER := @OS_LAYER@
 XSLTPROC := @XSLTPROC@
 XSLROOT := @XSLROOT@
 AUTOCONF := @AUTOCONF@
@@ -165,6 +166,17 @@ C_SRCS := $(srcroot)src/jemalloc.c \
 	$(srcroot)src/witness.c
 ifeq ($(enable_zone_allocator), 1)
 C_SRCS += $(srcroot)src/zone.c
+endif
+
+# OS layer translation units. Per-OS files supply OS-touching primitives
+# (declarations live in include/jemalloc/internal/os/<os>.h, included from
+# the os.h dispatcher). posix_common.c carries shared POSIX bodies and is
+# only compiled when the OS layer is a POSIX flavor.
+ifneq ($(OS_LAYER),)
+C_SRCS += $(srcroot)src/os/$(OS_LAYER).c
+ifneq ($(OS_LAYER),windows)
+C_SRCS += $(srcroot)src/os/posix_common.c
+endif
 endif
 ifeq ($(IMPORTLIB),$(SO))
 STATIC_LIBS := $(objroot)lib/$(LIBJEMALLOC).$(A)

@@ -11,6 +11,7 @@
 #include "jemalloc/internal/sc.h"
 #include "jemalloc/internal/tcache_externs.h"
 #include "jemalloc/internal/ticker.h"
+#include "jemalloc/internal/os.h"
 
 JEMALLOC_ALWAYS_INLINE malloc_cpuid_t
 malloc_getcpu(void) {

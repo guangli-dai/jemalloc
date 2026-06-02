@@ -936,6 +936,22 @@ AC_CHECK_HEADERS([malloc.h], [
          ])
 ])
 AC_DEFINE_UNQUOTED([JEMALLOC_USABLE_SIZE_CONST], [$JEMALLOC_USABLE_SIZE_CONST], [ ])
+
+dnl OS layer dispatch (see include/jemalloc/internal/os.h). One per-OS file
+dnl pair (include/jemalloc/internal/os/<os>.h + src/os/<os>.c) supplies every
+dnl OS-touching primitive used by portable code. Adding a new OS = drop in
+dnl those two files and extend this case + the os.h dispatcher.
+case "${host}" in
+  *-*-darwin* | *-*-ios*)        OS_LAYER="darwin"  ;;
+  *-*-freebsd* | *-*-kfreebsd*)  OS_LAYER="freebsd" ;;
+  *-*-linux*)                    OS_LAYER="linux"   ;;
+  *-*-netbsd*)                   OS_LAYER="netbsd"  ;;
+  *-*-solaris2*)                 OS_LAYER="solaris" ;;
+  *-*-mingw* | *-*-cygwin*)      OS_LAYER="windows" ;;
+  *)                             OS_LAYER=""        ;;
+esac
+AC_SUBST([OS_LAYER])
+
 AC_SUBST([abi])
 AC_SUBST([RPATH])
 AC_SUBST([LD_PRELOAD_VAR])
