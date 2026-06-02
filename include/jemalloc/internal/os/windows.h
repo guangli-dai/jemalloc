@@ -50,4 +50,73 @@ os_time_realtime(nstime_t *time) {
 	unreachable();
 }
 
+/* ====================================================================
+ * Process
+ *
+ * Process identity. Fork-handler registration is added later.
+ *
+ * Capability flags: none.
+ *
+ * Functions:
+ *   os_process_id() - current process id.
+ * ==================================================================== */
+JEMALLOC_ALWAYS_INLINE int
+os_process_id(void) {
+	return (int)GetCurrentProcessId();
+}
+
+/* ====================================================================
+ * File I/O
+ *
+ * Thin fd-based read/write/open/close used by malloc_io.c and prof_sys.c,
+ * backed by the C runtime io.h (_read/_write/_open/_close). Windows never
+ * fails with EINTR, so OS_FILE_RETRIES_EINTR is 0.
+ *
+ * Capability flags:
+ *   OS_FILE_RETRIES_EINTR : os_file_interrupted() can return true, i.e.
+ *                           callers must retry *_once() on EINTR.
+ *
+ * Functions:
+ *   os_file_open(path,flags)     - open a file; fd or -1.
+ *   os_file_close(fd)            - close; 0 on success.
+ *   os_file_lseek(fd,off,whence) - reposition file offset; new offset or -1.
+ *   os_file_read_once(fd,buf,n)  - one read();  bytes read or -1.
+ *   os_file_write_once(fd,buf,n) - one write(); bytes written or -1.
+ *   os_file_interrupted()        - true if the last call failed with EINTR.
+ * ==================================================================== */
+#include <io.h>
+#include <fcntl.h>
+
+#define OS_FILE_RETRIES_EINTR 0
+
+JEMALLOC_ALWAYS_INLINE ssize_t
+os_file_write_once(int fd, const void *buf, size_t count) {
+	return (ssize_t)write(fd, buf, (unsigned int)count);
+}
+
+JEMALLOC_ALWAYS_INLINE ssize_t
+os_file_read_once(int fd, void *buf, size_t count) {
+	return (ssize_t)read(fd, buf, (unsigned int)count);
+}
+
+JEMALLOC_ALWAYS_INLINE bool
+os_file_interrupted(void) {
+	return false;
+}
+
+JEMALLOC_ALWAYS_INLINE int
+os_file_open(const char *path, int flags) {
+	return open(path, flags);
+}
+
+JEMALLOC_ALWAYS_INLINE int
+os_file_close(int fd) {
+	return close(fd);
+}
+
+JEMALLOC_ALWAYS_INLINE off_t
+os_file_lseek(int fd, off_t offset, int whence) {
+	return lseek(fd, offset, whence);
+}
+
 #endif /* JEMALLOC_INTERNAL_OS_WINDOWS_H */

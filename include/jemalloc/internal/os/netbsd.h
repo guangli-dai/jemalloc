@@ -67,4 +67,100 @@ os_time_realtime(nstime_t *time) {
 #endif
 }
 
+/* ====================================================================
+ * Process
+ *
+ * Process identity. Fork-handler registration is added later.
+ *
+ * Capability flags: none.
+ *
+ * Functions:
+ *   os_process_id() - current process id.
+ * ==================================================================== */
+#include <sys/types.h>
+#include <unistd.h>
+
+JEMALLOC_ALWAYS_INLINE int
+os_process_id(void) {
+	return (int)getpid();
+}
+
+/* ====================================================================
+ * File I/O
+ *
+ * Thin fd-based read/write/open/close used by malloc_io.c and prof_sys.c.
+ * Direct syscalls where available.
+ *
+ * Capability flags:
+ *   OS_FILE_RETRIES_EINTR : os_file_interrupted() can return true, i.e.
+ *                           callers must retry *_once() on EINTR.
+ *
+ * Functions:
+ *   os_file_open(path,flags)     - open a file; fd or -1.
+ *   os_file_close(fd)            - close; 0 on success.
+ *   os_file_lseek(fd,off,whence) - reposition file offset; new offset or -1.
+ *   os_file_read_once(fd,buf,n)  - one read();  bytes read or -1.
+ *   os_file_write_once(fd,buf,n) - one write(); bytes written or -1.
+ *   os_file_interrupted()        - true if the last call failed with EINTR.
+ * ==================================================================== */
+#include <errno.h>
+#include <fcntl.h>
+#ifdef JEMALLOC_USE_SYSCALL
+#  include <sys/syscall.h>
+#endif
+
+#define OS_FILE_RETRIES_EINTR 1
+
+JEMALLOC_ALWAYS_INLINE ssize_t
+os_file_write_once(int fd, const void *buf, size_t count) {
+#if defined(JEMALLOC_USE_SYSCALL) && defined(SYS_write)
+	return (ssize_t)syscall(SYS_write, fd, buf, count);
+#else
+	return (ssize_t)write(fd, buf, count);
+#endif
+}
+
+JEMALLOC_ALWAYS_INLINE ssize_t
+os_file_read_once(int fd, void *buf, size_t count) {
+#if defined(JEMALLOC_USE_SYSCALL) && defined(SYS_read)
+	return (ssize_t)syscall(SYS_read, fd, buf, count);
+#else
+	return (ssize_t)read(fd, buf, count);
+#endif
+}
+
+JEMALLOC_ALWAYS_INLINE bool
+os_file_interrupted(void) {
+	return errno == EINTR;
+}
+
+JEMALLOC_ALWAYS_INLINE int
+os_file_open(const char *path, int flags) {
+#if defined(JEMALLOC_USE_SYSCALL) && defined(SYS_open)
+	return (int)syscall(SYS_open, path, flags);
+#elif defined(JEMALLOC_USE_SYSCALL) && defined(SYS_openat)
+	return (int)syscall(SYS_openat, AT_FDCWD, path, flags);
+#else
+	return open(path, flags);
+#endif
+}
+
+JEMALLOC_ALWAYS_INLINE int
+os_file_close(int fd) {
+#if defined(JEMALLOC_USE_SYSCALL) && defined(SYS_close)
+	return (int)syscall(SYS_close, fd);
+#else
+	return close(fd);
+#endif
+}
+
+JEMALLOC_ALWAYS_INLINE off_t
+os_file_lseek(int fd, off_t offset, int whence) {
+#if defined(JEMALLOC_USE_SYSCALL) && defined(SYS_lseek)
+	return (off_t)syscall(SYS_lseek, fd, offset, whence);
+#else
+	return lseek(fd, offset, whence);
+#endif
+}
+
 #endif /* JEMALLOC_INTERNAL_OS_NETBSD_H */
