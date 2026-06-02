@@ -198,6 +198,16 @@ os_vm_boot(void) {
  * Process
  * ==================================================================== */
 
+bool
+os_process_register_atfork(void (*prepare)(void), void (*parent)(void),
+    void (*child)(void)) {
+	/* Windows has no fork(2)/pthread_atfork. */
+	(void)prepare;
+	(void)parent;
+	(void)child;
+	return false;
+}
+
 /* ====================================================================
  * File I/O
  * ==================================================================== */

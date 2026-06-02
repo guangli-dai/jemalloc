@@ -293,6 +293,16 @@ os_vm_boot(void) {
  * Process
  * ==================================================================== */
 
+bool
+os_process_register_atfork(void (*prepare)(void), void (*parent)(void),
+    void (*child)(void)) {
+	/* Darwin's malloc-zone fork callbacks subsume pthread_atfork. */
+	(void)prepare;
+	(void)parent;
+	(void)child;
+	return false;
+}
+
 /* ====================================================================
  * File I/O
  * ==================================================================== */

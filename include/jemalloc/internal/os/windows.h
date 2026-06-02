@@ -296,17 +296,30 @@ os_cpu_current(void) {
 /* ====================================================================
  * Process
  *
- * Process identity. Fork-handler registration is added later.
+ * Process id and fork-handler registration. Windows has no fork(2) or
+ * pthread_atfork (CreateProcess does not duplicate the address space the way
+ * fork(2) does), so OS_PROCESS_HAS_ATFORK is 0 and os_process_register_atfork
+ * is a no-op (returns false).
  *
- * Capability flags: none.
+ * Capability flags:
+ *   OS_PROCESS_HAS_ATFORK : os_process_register_atfork installs hooks (0 =>
+ *                           it is a no-op).
  *
  * Functions:
- *   os_process_id() - current process id.
+ *   os_process_id()                          - GetCurrentProcessId().
+ *   os_process_register_atfork(pre,par,chld) - install fork handlers; no-op
+ *                                              that returns false on Windows.
  * ==================================================================== */
+#define OS_PROCESS_HAS_ATFORK 0
+
 JEMALLOC_ALWAYS_INLINE int
 os_process_id(void) {
 	return (int)GetCurrentProcessId();
 }
+
+bool os_process_register_atfork(void (*prepare)(void),
+                                void (*parent)(void),
+                                void (*child)(void));
 
 /* ====================================================================
  * File I/O

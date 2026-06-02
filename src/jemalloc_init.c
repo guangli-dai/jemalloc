@@ -340,20 +340,14 @@ malloc_init_hard_recursible(void) {
 		}
 	}
 
-#if (defined(JEMALLOC_HAVE_PTHREAD_ATFORK) && !defined(JEMALLOC_MUTEX_INIT_CB) \
-    && !defined(JEMALLOC_ZONE) && !defined(_WIN32)                             \
-    && !defined(__native_client__))
-	/* LinuxThreads' pthread_atfork() allocates. */
-	if (pthread_atfork(jemalloc_prefork, jemalloc_postfork_parent,
-	        jemalloc_postfork_child)
-	    != 0) {
+	if (os_process_register_atfork(jemalloc_prefork,
+	        jemalloc_postfork_parent, jemalloc_postfork_child)) {
 		malloc_write("<jemalloc>: Error in pthread_atfork()\n");
 		if (opt_abort) {
 			abort();
 		}
 		return true;
 	}
-#endif
 
 	if (background_thread_boot0()) {
 		return true;

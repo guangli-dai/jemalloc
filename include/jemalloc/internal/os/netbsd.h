@@ -281,13 +281,24 @@ os_cpu_current(void) {
 /* ====================================================================
  * Process
  *
- * Process identity. Fork-handler registration is added later.
+ * Process id and fork-handler registration. NetBSD registers fork hooks via
+ * pthread_atfork (out-of-line in src/os/netbsd.c; one-shot at boot).
  *
- * Capability flags: none.
+ * Capability flags:
+ *   OS_PROCESS_HAS_ATFORK : os_process_register_atfork installs hooks (0 =>
+ *                           it is a no-op that returns true).
  *
  * Functions:
- *   os_process_id() - current process id.
+ *   os_process_id()                         - getpid().
+ *   os_process_register_atfork(pre,par,chld) - install fork handlers; true
+ *                                             on failure.
  * ==================================================================== */
+#ifdef JEMALLOC_HAVE_PTHREAD_ATFORK
+#  define OS_PROCESS_HAS_ATFORK 1
+#else
+#  define OS_PROCESS_HAS_ATFORK 0
+#endif
+
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -295,6 +306,10 @@ JEMALLOC_ALWAYS_INLINE int
 os_process_id(void) {
 	return (int)getpid();
 }
+
+bool os_process_register_atfork(void (*prepare)(void),
+                                void (*parent)(void),
+                                void (*child)(void));
 
 /* ====================================================================
  * File I/O

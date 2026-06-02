@@ -591,6 +591,20 @@ os_vm_boot(void) {
  * Process
  * ==================================================================== */
 
+bool
+os_process_register_atfork(void (*prepare)(void), void (*parent)(void),
+    void (*child)(void)) {
+#ifdef JEMALLOC_HAVE_PTHREAD_ATFORK
+	/* LinuxThreads' pthread_atfork() allocates. */
+	return pthread_atfork(prepare, parent, child) != 0;
+#else
+	(void)prepare;
+	(void)parent;
+	(void)child;
+	return false;
+#endif
+}
+
 /* ====================================================================
  * File I/O
  * ==================================================================== */

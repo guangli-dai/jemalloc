@@ -360,6 +360,19 @@ os_vm_boot(void) {
  * Process
  * ==================================================================== */
 
+bool
+os_process_register_atfork(void (*prepare)(void), void (*parent)(void),
+    void (*child)(void)) {
+#if defined(JEMALLOC_HAVE_PTHREAD_ATFORK) && !defined(JEMALLOC_MUTEX_INIT_CB)
+	return pthread_atfork(prepare, parent, child) != 0;
+#else
+	(void)prepare;
+	(void)parent;
+	(void)child;
+	return false;
+#endif
+}
+
 /* ====================================================================
  * File I/O
  * ==================================================================== */

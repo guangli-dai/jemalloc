@@ -357,13 +357,22 @@ os_cpu_current(void) {
 /* ====================================================================
  * Process
  *
- * Process identity. Fork-handler registration is added later.
+ * Process id and fork-handler registration. On Darwin the malloc-zone fork
+ * callbacks subsume pthread_atfork, so os_process_register_atfork is a no-op
+ * that returns false. See zone.c (folded into darwin.c).
  *
- * Capability flags: none.
+ * Capability flags:
+ *   OS_PROCESS_HAS_ATFORK : os_process_register_atfork installs hooks (0 =>
+ *                           it is a no-op; on Darwin it returns false).
  *
  * Functions:
- *   os_process_id() - current process id.
+ *   os_process_id()                         - getpid().
+ *   os_process_register_atfork(pre,par,chld) - install fork handlers; true
+ *                                             on failure (no-op returning false
+ *                                             on Darwin).
  * ==================================================================== */
+#define OS_PROCESS_HAS_ATFORK 0
+
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -371,6 +380,10 @@ JEMALLOC_ALWAYS_INLINE int
 os_process_id(void) {
 	return (int)getpid();
 }
+
+bool os_process_register_atfork(void (*prepare)(void),
+                                void (*parent)(void),
+                                void (*child)(void));
 
 /* ====================================================================
  * File I/O
