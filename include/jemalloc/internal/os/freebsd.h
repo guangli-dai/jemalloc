@@ -68,6 +68,88 @@ os_time_realtime(nstime_t *time) {
 }
 
 /* ====================================================================
+ * Thread
+ *
+ * OS-level thread identity. FreeBSD does not expose a gettid-style id here.
+ *
+ * Capability flags:
+ *   OS_THREAD_HAS_GETTID : os_thread_id() is defined (backed by gettid()).
+ *
+ * Functions: none.
+ * ==================================================================== */
+#define OS_THREAD_HAS_GETTID 0
+
+/* ====================================================================
+ * CPU
+ *
+ * CPU counts and current-CPU queries used for arena / tcache sizing.
+ *
+ * Capability flags: none.
+ *
+ * Functions:
+ *   os_cpu_ncpus()                  - number of usable CPUs (>= 1).
+ *   os_cpu_count_is_deterministic() - false if the CPU count can change at
+ *                                     runtime (affects caching decisions).
+ *   os_cpu_current()                - current CPU index, or -1 if unknown.
+ * ==================================================================== */
+#include <sched.h>
+#include <pthread.h>
+#include <pthread_np.h>
+#include <sys/cpuset.h>
+
+JEMALLOC_ALWAYS_INLINE unsigned
+os_cpu_ncpus(void) {
+	long result;
+#ifdef CPU_COUNT
+	cpuset_t set;
+#  ifdef JEMALLOC_HAVE_SCHED_SETAFFINITY
+	sched_getaffinity(0, sizeof(set), &set);
+#  else
+	pthread_getaffinity_np(pthread_self(), sizeof(set), &set);
+#  endif
+	result = CPU_COUNT(&set);
+#else
+	result = sysconf(_SC_NPROCESSORS_ONLN);
+#endif
+	return (result == -1) ? 1u : (unsigned)result;
+}
+
+JEMALLOC_ALWAYS_INLINE bool
+os_cpu_count_is_deterministic(void) {
+	long cpu_onln = sysconf(_SC_NPROCESSORS_ONLN);
+	long cpu_conf = sysconf(_SC_NPROCESSORS_CONF);
+	if (cpu_onln != cpu_conf) {
+		return false;
+	}
+#ifdef CPU_COUNT
+	cpuset_t set;
+#  ifdef JEMALLOC_HAVE_SCHED_SETAFFINITY
+	sched_getaffinity(0, sizeof(set), &set);
+#  else
+	pthread_getaffinity_np(pthread_self(), sizeof(set), &set);
+#  endif
+	long cpu_affinity = CPU_COUNT(&set);
+	if (cpu_affinity != cpu_conf) {
+		return false;
+	}
+#endif
+	return true;
+}
+
+JEMALLOC_ALWAYS_INLINE int
+os_cpu_current(void) {
+#if defined(JEMALLOC_HAVE_SCHED_GETCPU)
+	return sched_getcpu();
+#elif defined(JEMALLOC_HAVE_RDTSCP)
+	unsigned int ecx;
+	asm volatile("rdtscp" : "=c"(ecx)::"eax", "edx");
+	return (int)(ecx & 0xfff);
+#else
+	return -1;
+#endif
+}
+
+/* ====================================================================
  * Process
  *
  * Process identity. Fork-handler registration is added later.

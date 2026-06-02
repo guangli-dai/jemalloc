@@ -160,7 +160,7 @@ prof_thread_stack_range(uintptr_t fp, uintptr_t *low, uintptr_t *high) {
     */
 	char maps_path[64]; // "/proc/<pid>/task/<tid>/maps"
 	malloc_snprintf(maps_path, sizeof(maps_path), "/proc/%d/task/%d/maps",
-	    os_process_id(), gettid());
+	    os_process_id(), os_thread_id());
 	return prof_mapping_containing_addr(fp, maps_path, low, high);
 }
 

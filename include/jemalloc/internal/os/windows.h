@@ -51,6 +51,49 @@ os_time_realtime(nstime_t *time) {
 }
 
 /* ====================================================================
+ * Thread
+ *
+ * OS-level thread identity. Windows does not expose a gettid()-style kernel
+ * thread id here, so OS_THREAD_HAS_GETTID is 0 and no os_thread_id is provided.
+ *
+ * Capability flags:
+ *   OS_THREAD_HAS_GETTID : os_thread_id() is defined (backed by gettid()).
+ *
+ * Functions: none.
+ * ==================================================================== */
+#define OS_THREAD_HAS_GETTID 0
+
+/* ====================================================================
+ * CPU
+ *
+ * CPU counts and current-CPU queries used for arena / tcache sizing.
+ *
+ * Capability flags: none.
+ *
+ * Functions:
+ *   os_cpu_ncpus()                  - number of usable CPUs (>= 1).
+ *   os_cpu_count_is_deterministic() - false if the CPU count can change at
+ *                                     runtime (affects caching decisions).
+ *   os_cpu_current()                - current CPU index, or -1 if unknown.
+ * ==================================================================== */
+JEMALLOC_ALWAYS_INLINE unsigned
+os_cpu_ncpus(void) {
+	SYSTEM_INFO si;
+	GetSystemInfo(&si);
+	return (unsigned)si.dwNumberOfProcessors;
+}
+
+JEMALLOC_ALWAYS_INLINE bool
+os_cpu_count_is_deterministic(void) {
+	return true;
+}
+
+JEMALLOC_ALWAYS_INLINE int
+os_cpu_current(void) {
+	return (int)GetCurrentProcessorNumber();
+}
+
+/* ====================================================================
  * Process
  *
  * Process identity. Fork-handler registration is added later.
