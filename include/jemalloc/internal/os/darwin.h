@@ -13,6 +13,111 @@
  */
 
 /* ====================================================================
+ * Sync (mutex)
+ *
+ * macOS 10.12+ exposes os_unfair_lock; jemalloc selects it via
+ * JEMALLOC_OS_UNFAIR_LOCK at configure time and defines its own os_mutex_t
+ * (os_unfair_lock) plus the os_mutex_* bodies inline here, rather than the
+ * posix_common pthread mutex. os_unfair_lock has no destroy and no
+ * postfork_child fixup beyond resetting to OS_UNFAIR_LOCK_INIT (it's a single
+ * atomic word). Older macOS falls back to the posix_common pthread mutex
+ * (OS_MUTEX_USE_PTHREAD), supplying only os_mutex_init locally.
+ *
+ * Capability flags:
+ *   OS_MUTEX_USE_PTHREAD     : select the pthread mutex backend (posix_common.h);
+ *                              defined only on the older-macOS fallback path.
+ *   OS_MUTEX_HAS_STATIC_INIT : OS_MUTEX_INITIALIZER is a valid static initializer.
+ *
+ * Functions:
+ *   os_mutex_lock(m)    - acquire the lock (void; os_unfair_lock path).
+ *   os_mutex_unlock(m)  - release the lock (void; os_unfair_lock path).
+ *   os_mutex_trylock(m) - try to acquire; true on failure (os_unfair_lock path).
+ *   os_mutex_destroy(m) - no-op for os_unfair_lock (void; os_unfair_lock path).
+ *   os_mutex_init(m)    - dynamically init a mutex; true on failure (defined on
+ *                         both the os_unfair_lock and pthread-fallback paths).
+ * ==================================================================== */
+#ifdef JEMALLOC_OS_UNFAIR_LOCK
+#  include <os/lock.h>
+#  define OS_MUTEX_HAS_STATIC_INIT 1
+
+typedef os_unfair_lock os_mutex_t;
+#  define OS_MUTEX_INITIALIZER OS_UNFAIR_LOCK_INIT
+
+JEMALLOC_ALWAYS_INLINE void
+os_mutex_lock(os_mutex_t *m) {
+	os_unfair_lock_lock(m);
+}
+
+JEMALLOC_ALWAYS_INLINE void
+os_mutex_unlock(os_mutex_t *m) {
+	os_unfair_lock_unlock(m);
+}
+
+JEMALLOC_ALWAYS_INLINE bool
+os_mutex_trylock(os_mutex_t *m) {
+	return !os_unfair_lock_trylock(m);
+}
+
+JEMALLOC_ALWAYS_INLINE void
+os_mutex_destroy(os_mutex_t *m) {
+	(void)m;
+}
+
+JEMALLOC_ALWAYS_INLINE bool
+os_mutex_init(os_mutex_t *m) {
+	*m = (os_unfair_lock)OS_UNFAIR_LOCK_INIT;
+	return false;
+}
+
+#else /* fall back to pthread mutex on older macOS */
+#  define OS_MUTEX_USE_PTHREAD
+#  define OS_MUTEX_HAS_STATIC_INIT 1
+#endif
+
+/* ====================================================================
+ * Cond + sigmask
+ *
+ * Defined only when background_thread support is compiled in
+ * (JEMALLOC_BACKGROUND_THREAD), which is not the default on Darwin. When it is,
+ * this section selects the posix_common pthread cond and sigset_t sigmask
+ * backends and their inline bodies come from posix_common.h (included just
+ * below); the cond is paired with a pthread_mutex_t the caller manages
+ * separately (background_thread_info_t carries both fields today).
+ *
+ * Capability flags:
+ *   OS_COND_USE_PTHREAD   : select the pthread cond backend (posix_common.h).
+ *   OS_SIGMASK_USE_POSIX  : select the sigset_t sigmask backend (posix_common.h).
+ *   OS_COND_HAS_TIMEDWAIT : os_cond_timedwait is available.
+ *
+ * Functions (posix_common.h, only when JEMALLOC_BACKGROUND_THREAD is set):
+ *   os_cond_init/destroy/wait/timedwait/signal, os_sigmask_all_enter/leave.
+ * ==================================================================== */
+#ifdef JEMALLOC_BACKGROUND_THREAD
+#  define OS_COND_USE_PTHREAD
+#  define OS_SIGMASK_USE_POSIX
+#  define OS_COND_HAS_TIMEDWAIT 1
+#endif
+
+#include "jemalloc/internal/os/posix_common.h"
+
+#ifndef JEMALLOC_OS_UNFAIR_LOCK
+JEMALLOC_ALWAYS_INLINE bool
+os_mutex_init(os_mutex_t *m) {
+	pthread_mutexattr_t attr;
+	if (pthread_mutexattr_init(&attr) != 0) {
+		return true;
+	}
+	pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_DEFAULT);
+	if (pthread_mutex_init(m, &attr) != 0) {
+		pthread_mutexattr_destroy(&attr);
+		return true;
+	}
+	pthread_mutexattr_destroy(&attr);
+	return false;
+}
+#endif
+
+/* ====================================================================
  * Time
  *
  * Monotonic and realtime clock reads, written into a caller-provided

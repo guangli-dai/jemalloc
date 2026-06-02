@@ -167,14 +167,14 @@ background_thread_cond_wait(
 	int ret;
 
 	/*
-	 * pthread_cond_wait drops and re-acquires the mutex internally, w/o
+	 * os_cond_wait drops and re-acquires the mutex internally, w/o
 	 * going through our wrapper.  Update the locked state explicitly.
 	 */
 	atomic_store_b(&info->mtx.locked, false, ATOMIC_RELAXED);
 	if (ts == NULL) {
-		ret = pthread_cond_wait(&info->cond, &info->mtx.lock);
+		ret = os_cond_wait(&info->cond, &info->mtx.lock);
 	} else {
-		ret = pthread_cond_timedwait(&info->cond, &info->mtx.lock, ts);
+		ret = os_cond_timedwait(&info->cond, &info->mtx.lock, ts);
 	}
 	atomic_store_b(&info->mtx.locked, true, ATOMIC_RELAXED);
 
@@ -310,7 +310,7 @@ background_threads_disable_single(tsd_t *tsd, background_thread_info_t *info) {
 	if (info->state == background_thread_started) {
 		has_thread = true;
 		info->state = background_thread_stopped;
-		pthread_cond_signal(&info->cond);
+		os_cond_signal(&info->cond);
 	} else {
 		has_thread = false;
 	}
@@ -341,10 +341,8 @@ background_thread_create_signals_masked(pthread_t *thread,
 	 * Mask signals during thread creation so that the thread inherits
 	 * an empty signal set.
 	 */
-	sigset_t set;
-	sigfillset(&set);
-	sigset_t oldset;
-	int      mask_err = pthread_sigmask(SIG_SETMASK, &set, &oldset);
+	os_sigmask_t oldset;
+	int      mask_err = os_sigmask_all_enter(&oldset);
 	if (mask_err != 0) {
 		return mask_err;
 	}
@@ -354,7 +352,7 @@ background_thread_create_signals_masked(pthread_t *thread,
 	 * Restore the signal mask.  Failure to restore the signal mask here
 	 * changes program behavior.
 	 */
-	int restore_err = pthread_sigmask(SIG_SETMASK, &oldset, NULL);
+	int restore_err = os_sigmask_leave(&oldset);
 	if (restore_err != 0) {
 		malloc_printf(
 		    "<jemalloc>: background thread creation "
@@ -565,7 +563,7 @@ background_thread_create_locked(tsd_t *tsd, unsigned arena_ind) {
 		/* Threads are created asynchronously by Thread 0. */
 		background_thread_info_t *t0 = &background_thread_info[0];
 		malloc_mutex_lock(tsd_tsdn(tsd), &t0->mtx);
-		pthread_cond_signal(&t0->cond);
+		os_cond_signal(&t0->cond);
 		malloc_mutex_unlock(tsd_tsdn(tsd), &t0->mtx);
 
 		return false;
@@ -697,7 +695,7 @@ background_thread_wakeup_early(
 	    && nstime_ns(remaining_sleep) < BACKGROUND_THREAD_MIN_INTERVAL_NS) {
 		return;
 	}
-	pthread_cond_signal(&info->cond);
+	os_cond_signal(&info->cond);
 }
 
 void
@@ -741,8 +739,8 @@ background_thread_postfork_child(tsdn_t *tsdn) {
 		background_thread_info_t *info = &background_thread_info[i];
 		malloc_mutex_lock(tsdn, &info->mtx);
 		info->state = background_thread_stopped;
-		int ret = pthread_cond_init(&info->cond, NULL);
-		assert(ret == 0);
+		bool ret = os_cond_init(&info->cond);
+		assert(!ret);
 		background_thread_info_init(tsdn, info);
 		malloc_mutex_unlock(tsdn, &info->mtx);
 	}
@@ -859,7 +857,7 @@ background_thread_boot1(tsdn_t *tsdn, base_t *base) {
 		        malloc_mutex_address_ordered)) {
 			return true;
 		}
-		if (pthread_cond_init(&info->cond, NULL)) {
+		if (os_cond_init(&info->cond)) {
 			return true;
 		}
 		malloc_mutex_lock(tsdn, &info->mtx);

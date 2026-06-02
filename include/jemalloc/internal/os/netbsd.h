@@ -13,6 +13,48 @@
  */
 
 /* ====================================================================
+ * Sync (mutex) + Cond + sigmask
+ *
+ * NetBSD uses the POSIX pthread backend: this section selects it, and the
+ * typedefs + inline bodies (os_mutex_lock/unlock/trylock/destroy, os_cond_*,
+ * os_sigmask_*) come from posix_common.h. Only os_mutex_init is NetBSD-local.
+ *
+ * Capability flags:
+ *   OS_MUTEX_USE_PTHREAD     : select the pthread mutex backend (posix_common.h).
+ *   OS_COND_USE_PTHREAD      : select the pthread cond backend (posix_common.h).
+ *   OS_SIGMASK_USE_POSIX     : select the sigset_t sigmask backend (posix_common.h).
+ *   OS_MUTEX_HAS_STATIC_INIT : OS_MUTEX_INITIALIZER is a valid static initializer.
+ *   OS_COND_HAS_TIMEDWAIT    : os_cond_timedwait is available.
+ *
+ * Functions (this file):
+ *   os_mutex_init(m) - dynamically init a mutex; true on failure.
+ * Functions (posix_common.h): os_mutex_lock/unlock/trylock/destroy,
+ *   os_cond_init/destroy/wait/timedwait/signal, os_sigmask_all_enter/leave.
+ * ==================================================================== */
+#define OS_MUTEX_USE_PTHREAD
+#define OS_COND_USE_PTHREAD
+#define OS_SIGMASK_USE_POSIX
+#define OS_MUTEX_HAS_STATIC_INIT 1
+#define OS_COND_HAS_TIMEDWAIT 1
+
+#include "jemalloc/internal/os/posix_common.h"
+
+JEMALLOC_ALWAYS_INLINE bool
+os_mutex_init(os_mutex_t *m) {
+	pthread_mutexattr_t attr;
+	if (pthread_mutexattr_init(&attr) != 0) {
+		return true;
+	}
+	pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_DEFAULT);
+	if (pthread_mutex_init(m, &attr) != 0) {
+		pthread_mutexattr_destroy(&attr);
+		return true;
+	}
+	pthread_mutexattr_destroy(&attr);
+	return false;
+}
+
+/* ====================================================================
  * Time
  *
  * Monotonic and realtime clock reads, written into a caller-provided

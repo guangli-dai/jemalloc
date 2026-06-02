@@ -13,6 +13,106 @@
  */
 
 /* ====================================================================
+ * Sync (mutex)
+ *
+ * Windows defines its own os_mutex_t and inline bodies here (it does not use
+ * posix_common.h). On Vista+ os_mutex_t is SRWLOCK (lighter than
+ * CRITICAL_SECTION); older targets fall back to CRITICAL_SECTION with a spin
+ * count. malloc_mutex_t embeds os_mutex_t as its `lock` field;
+ * MALLOC_MUTEX_INITIALIZER stays empty (the lock is initialized at runtime via
+ * os_mutex_init from malloc_mutex_init / malloc_mutex_boot).
+ *
+ * Capability flags:
+ *   OS_MUTEX_HAS_STATIC_INIT : OS_MUTEX_INITIALIZER is a valid static initializer.
+ *
+ * Functions:
+ *   os_mutex_init(m) - dynamically init a mutex; true on failure.
+ *   os_mutex_lock/unlock/trylock/destroy - acquire/release/try/teardown.
+ * ==================================================================== */
+#if _WIN32_WINNT >= 0x0600
+typedef SRWLOCK os_mutex_t;
+/*
+ * MALLOC_MUTEX_INITIALIZER stays empty on Windows: jemalloc_init.c uses a
+ * direct SRWLOCK_INIT for init_lock, and tsd.c never expands the macro on
+ * Windows. Keeping OS_MUTEX_HAS_STATIC_INIT 0 preserves that.
+ */
+#  define OS_MUTEX_HAS_STATIC_INIT 0
+
+JEMALLOC_ALWAYS_INLINE void
+os_mutex_lock(os_mutex_t *m) {
+	AcquireSRWLockExclusive(m);
+}
+
+JEMALLOC_ALWAYS_INLINE void
+os_mutex_unlock(os_mutex_t *m) {
+	ReleaseSRWLockExclusive(m);
+}
+
+JEMALLOC_ALWAYS_INLINE bool
+os_mutex_trylock(os_mutex_t *m) {
+	return !TryAcquireSRWLockExclusive(m);
+}
+
+JEMALLOC_ALWAYS_INLINE void
+os_mutex_destroy(os_mutex_t *m) {
+	(void)m;
+}
+
+JEMALLOC_ALWAYS_INLINE bool
+os_mutex_init(os_mutex_t *m) {
+	InitializeSRWLock(m);
+	return false;
+}
+#else
+typedef CRITICAL_SECTION os_mutex_t;
+#  define OS_MUTEX_HAS_STATIC_INIT 0
+
+#  ifndef _CRT_SPINCOUNT
+#    define _CRT_SPINCOUNT 4000
+#  endif
+
+JEMALLOC_ALWAYS_INLINE void
+os_mutex_lock(os_mutex_t *m) {
+	EnterCriticalSection(m);
+}
+
+JEMALLOC_ALWAYS_INLINE void
+os_mutex_unlock(os_mutex_t *m) {
+	LeaveCriticalSection(m);
+}
+
+JEMALLOC_ALWAYS_INLINE bool
+os_mutex_trylock(os_mutex_t *m) {
+	return !TryEnterCriticalSection(m);
+}
+
+JEMALLOC_ALWAYS_INLINE void
+os_mutex_destroy(os_mutex_t *m) {
+	DeleteCriticalSection(m);
+}
+
+JEMALLOC_ALWAYS_INLINE bool
+os_mutex_init(os_mutex_t *m) {
+	return !InitializeCriticalSectionAndSpinCount(m, _CRT_SPINCOUNT);
+}
+#endif
+
+/* ====================================================================
+ * Cond + sigmask
+ *
+ * Windows has no sigmask, and it does not enable JEMALLOC_BACKGROUND_THREAD
+ * today, so the cond + sigmask facility is effectively unused. Reserved for a
+ * future native port via CONDITION_VARIABLE / SleepConditionVariableSRW; no
+ * cond/sigmask functions are provided here.
+ *
+ * Capability flags:
+ *   OS_COND_HAS_TIMEDWAIT : os_cond_timedwait is available.
+ *
+ * Functions: none.
+ * ==================================================================== */
+#define OS_COND_HAS_TIMEDWAIT 0
+
+/* ====================================================================
  * Time
  *
  * Clock reads into a caller-provided nstime_t. Windows has no cheap monotonic
