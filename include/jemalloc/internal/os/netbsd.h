@@ -13,6 +13,121 @@
  */
 
 /* ====================================================================
+ * VM
+ *
+ * NetBSD's VM facility uses mmap with MAP_ALIGNED for aligned reservations
+ * (similar in spirit to FreeBSD's MAP_ALIGNED). The kernel always
+ * overcommits (no sysctl needed), so os_overcommits is hard-coded true.
+ * NetBSD's PAGE may exceed os_page on platforms where PAGE is taken from the
+ * worst-case ISA, so MAP_ALIGNED is requested whenever align > os_page or
+ * PAGE > os_page. Out-of-line bodies live in src/os/netbsd.c. State:
+ * `os_overcommits` (boot cache).
+ *
+ * Capability flags:
+ *   OS_VM_HAS_HUGEPAGE        : os_vm_hugepage/nohugepage can hint THP.
+ *   OS_VM_HAS_HUGE_COLLAPSE   : os_vm_huge_collapse is supported.
+ *   OS_VM_HAS_BATCH_PURGE     : os_vm_batch_purge (process_madvise) works.
+ *   OS_VM_HAS_PURGE_LAZY      : os_vm_purge_lazy reclaims lazily (MADV_FREE).
+ *   OS_VM_HAS_PURGE_FORCED    : os_vm_purge_forced reclaims immediately.
+ *   OS_VM_HAS_DONTDUMP        : os_vm_dontdump/dodump are supported.
+ *   OS_VM_HAS_GUARD_PAGES     : os_vm_mark_guards/unmark_guards are supported.
+ *   OS_VM_HAS_OVERCOMMIT_INFO : os_vm_overcommit_mode is meaningful (NetBSD
+ *                               overcommits unconditionally, so it is always
+ *                               well-defined).
+ *   OS_VM_HAS_THP_INFO        : os_vm_thp_system_mode is meaningful.
+ *   OS_VM_HAS_SET_NAME        : os_vm_set_name can name a mapping.
+ *   OS_VM_CAN_PARTIAL_RELEASE : a sub-range can be released in place
+ *                               (0 => pages.c must release + re-reserve).
+ *   OS_VM_LAZY_PURGE_NEEDS_RUNTIME_CHECK : MADV_FREE must be probed at
+ *                               runtime by pages_boot.
+ *
+ * Functions (bool returns are true-on-failure unless noted):
+ *   os_vm_overcommit_mode()                - cached overcommit policy (int).
+ *   os_vm_page_size()                      - system page size in bytes.
+ *   os_vm_boot()                           - one-time init.
+ *   os_vm_reserve(hint,size,align,*commit) - reserve space; base or NULL,
+ *                                            may clear *commit.
+ *   os_vm_release(addr,size)               - unmap a reservation (void).
+ *   os_vm_commit(addr,size)                - back a range with memory.
+ *   os_vm_decommit(addr,size)              - drop backing, keep reservation.
+ *   os_vm_mark_guards(head,tail)           - protect guard pages (void).
+ *   os_vm_unmark_guards(head,tail)         - undo mark_guards (void).
+ *   os_vm_purge_lazy(addr,size)            - lazy reclaim (MADV_FREE).
+ *   os_vm_purge_forced(addr,size)          - immediate reclaim.
+ *   os_vm_purge_forced_is_enabled()        - true if forced purge is usable.
+ *   os_vm_batch_purge(vec,vec_len,total)   - purge many ranges at once.
+ *   os_vm_hugepage(addr,size)              - hint huge pages.
+ *   os_vm_nohugepage(addr,size)            - undo hugepage hint.
+ *   os_vm_huge_collapse(addr,size)         - request synchronous THP collapse.
+ *   os_vm_dontdump(addr,size)              - exclude range from core dumps.
+ *   os_vm_dodump(addr,size)                - undo dontdump.
+ *   os_vm_set_name(addr,size,name)         - name a mapping (debugging).
+ *   os_vm_thp_system_mode()                - system THP mode (int).
+ * ==================================================================== */
+#define OS_VM_HAS_HUGEPAGE 0
+#define OS_VM_HAS_HUGE_COLLAPSE 0
+#define OS_VM_HAS_BATCH_PURGE 0
+
+#ifdef JEMALLOC_PURGE_MADVISE_FREE
+#  define OS_VM_HAS_PURGE_LAZY 1
+#else
+#  define OS_VM_HAS_PURGE_LAZY 0
+#endif
+
+#if (defined(JEMALLOC_PURGE_MADVISE_DONTNEED)                                  \
+        && defined(JEMALLOC_PURGE_MADVISE_DONTNEED_ZEROS))                     \
+    || defined(JEMALLOC_MAPS_COALESCE)
+#  define OS_VM_HAS_PURGE_FORCED 1
+#else
+#  define OS_VM_HAS_PURGE_FORCED 0
+#endif
+
+#define OS_VM_HAS_DONTDUMP 0
+#define OS_VM_HAS_GUARD_PAGES 1
+/* NetBSD overcommits unconditionally; treat OVERCOMMIT_INFO as available
+ * since os_vm_overcommit_mode is well-defined. */
+#define OS_VM_HAS_OVERCOMMIT_INFO 1
+#define OS_VM_HAS_THP_INFO 0
+#define OS_VM_HAS_SET_NAME 0
+
+#define OS_VM_CAN_PARTIAL_RELEASE 1
+#define OS_VM_LAZY_PURGE_NEEDS_RUNTIME_CHECK 1
+
+extern bool os_overcommits;
+
+JEMALLOC_ALWAYS_INLINE int
+os_vm_overcommit_mode(void) {
+	return (int)os_overcommits;
+}
+
+size_t os_vm_page_size(void);
+bool   os_vm_boot(void);
+
+void  *os_vm_reserve(void *hint, size_t size, size_t align, bool *commit);
+void   os_vm_release(void *addr, size_t size);
+bool   os_vm_commit(void *addr, size_t size);
+bool   os_vm_decommit(void *addr, size_t size);
+
+void   os_vm_mark_guards(void *head, void *tail);
+void   os_vm_unmark_guards(void *head, void *tail);
+
+bool   os_vm_purge_lazy(void *addr, size_t size);
+bool   os_vm_purge_forced(void *addr, size_t size);
+bool   os_vm_purge_forced_is_enabled(void);
+bool   os_vm_batch_purge(void *vec, size_t vec_len, size_t total_bytes);
+
+bool   os_vm_hugepage(void *addr, size_t size);
+bool   os_vm_nohugepage(void *addr, size_t size);
+bool   os_vm_huge_collapse(void *addr, size_t size);
+
+bool   os_vm_dontdump(void *addr, size_t size);
+bool   os_vm_dodump(void *addr, size_t size);
+
+bool   os_vm_set_name(void *addr, size_t size, const char *name);
+
+int    os_vm_thp_system_mode(void);
+
+/* ====================================================================
  * Sync (mutex) + Cond + sigmask
  *
  * NetBSD uses the POSIX pthread backend: this section selects it, and the
