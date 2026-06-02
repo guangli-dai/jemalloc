@@ -385,4 +385,21 @@ os_file_lseek(int fd, off_t offset, int whence) {
  * Functions: none.
  * ==================================================================== */
 
+/* ====================================================================
+ * DSS / sbrk
+ *
+ * Data-segment growth via sbrk(2), used by src/extent_dss.c. Windows has no
+ * sbrk(2), so DSS is unsupported: OS_DSS_HAS_SBRK is always 0 and os_dss_sbrk
+ * is declared but unreachable.
+ *
+ * Capability flags:
+ *   OS_DSS_HAS_SBRK : os_dss_sbrk is usable (always 0 on Windows).
+ *
+ * Functions:
+ *   os_dss_sbrk(increment) - move the program break; unreachable on Windows.
+ * ==================================================================== */
+#define OS_DSS_HAS_SBRK 0
+
+void *os_dss_sbrk(intptr_t increment);
+
 #endif /* JEMALLOC_INTERNAL_OS_WINDOWS_H */

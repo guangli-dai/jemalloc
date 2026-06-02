@@ -214,7 +214,18 @@ os_process_register_atfork(void (*prepare)(void), void (*parent)(void),
 
 /* ====================================================================
  * DSS / sbrk
+ *
+ * Windows has no sbrk(2); extent_dss.c never reaches this on a
+ * Windows build (OS_DSS_HAS_SBRK = 0 routes around it), so the body is
+ * unreachable.
  * ==================================================================== */
+
+void *
+os_dss_sbrk(intptr_t increment) {
+	(void)increment;
+	not_reached();
+	return NULL;
+}
 
 /* ====================================================================
  * Windows DLL TLS callback (.CRT$XLY)   (folded in from tsd.c)

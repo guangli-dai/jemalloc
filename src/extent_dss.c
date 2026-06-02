@@ -41,14 +41,15 @@ extent_dss_sbrk_hook_t extent_dss_sbrk_hook = NULL;
 
 static void *
 extent_dss_sbrk(intptr_t increment) {
-#ifdef JEMALLOC_DSS
+#if OS_DSS_HAS_SBRK
 #ifdef JEMALLOC_JET
 	if (extent_dss_sbrk_hook != NULL) {
 		return extent_dss_sbrk_hook(increment);
 	}
 #endif
-	return sbrk(increment);
+	return os_dss_sbrk(increment);
 #else
+	(void)increment;
 	not_implemented();
 	return NULL;
 #endif

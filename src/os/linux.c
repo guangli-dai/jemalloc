@@ -616,3 +616,14 @@ os_process_register_atfork(void (*prepare)(void), void (*parent)(void),
 /* ====================================================================
  * DSS / sbrk
  * ==================================================================== */
+
+void *
+os_dss_sbrk(intptr_t increment) {
+#ifdef JEMALLOC_DSS
+	return sbrk(increment);
+#else
+	(void)increment;
+	not_reached();
+	return NULL;
+#endif
+}

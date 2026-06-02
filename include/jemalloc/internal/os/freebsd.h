@@ -440,4 +440,27 @@ os_file_lseek(int fd, off_t offset, int whence) {
  * Functions: none.
  * ==================================================================== */
 
+/* ====================================================================
+ * DSS / sbrk
+ *
+ * Data-segment growth via sbrk(2), used by src/extent_dss.c. FreeBSD
+ * provides sbrk(2); the capability flag mirrors JEMALLOC_DSS. Out-of-line
+ * body in src/os/freebsd.c.
+ *
+ * Capability flags:
+ *   OS_DSS_HAS_SBRK : os_dss_sbrk is usable (mirrors JEMALLOC_DSS, which
+ *                     configure sets when sbrk is detected on the host).
+ *
+ * Functions:
+ *   os_dss_sbrk(increment) - move the program break; previous break, or
+ *                            (void *)-1 on failure.
+ * ==================================================================== */
+#ifdef JEMALLOC_DSS
+#  define OS_DSS_HAS_SBRK 1
+#else
+#  define OS_DSS_HAS_SBRK 0
+#endif
+
+void *os_dss_sbrk(intptr_t increment);
+
 #endif /* JEMALLOC_INTERNAL_OS_FREEBSD_H */
