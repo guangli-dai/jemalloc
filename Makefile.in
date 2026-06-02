@@ -164,9 +164,6 @@ C_SRCS := $(srcroot)src/jemalloc.c \
 	$(srcroot)src/tsd.c \
 	$(srcroot)src/util.c \
 	$(srcroot)src/witness.c
-ifeq ($(enable_zone_allocator), 1)
-C_SRCS += $(srcroot)src/zone.c
-endif
 
 # OS layer translation units. Per-OS files supply OS-touching primitives
 # (declarations live in include/jemalloc/internal/os/<os>.h, included from

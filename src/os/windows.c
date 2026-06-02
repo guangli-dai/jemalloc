@@ -215,3 +215,98 @@ os_process_register_atfork(void (*prepare)(void), void (*parent)(void),
 /* ====================================================================
  * DSS / sbrk
  * ==================================================================== */
+
+/* ====================================================================
+ * Windows DLL TLS callback (.CRT$XLY)   (folded in from tsd.c)
+ *
+ * The linker scans every object file for a .CRT$XLY section and emits a
+ * TLS-callback table from the union, so this binding works equally well
+ * here as it did in tsd.c.
+ * ==================================================================== */
+
+static BOOL WINAPI
+_tls_callback(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {
+	switch (fdwReason) {
+#ifdef JEMALLOC_LAZY_LOCK
+	case DLL_THREAD_ATTACH:
+		isthreaded = true;
+		break;
+#endif
+	case DLL_THREAD_DETACH:
+		_malloc_thread_cleanup();
+		break;
+	default:
+		break;
+	}
+	return true;
+}
+
+/*
+ * We need to be able to say "read" here (in the "pragma section"), but
+ * have hooked "read". We won't read for the rest of the file, so we can
+ * get away with unhooking.
+ */
+#ifdef read
+#  undef read
+#endif
+
+#ifdef _MSC_VER
+#  ifdef _M_IX86
+#    pragma comment(linker, "/INCLUDE:__tls_used")
+#    pragma comment(linker, "/INCLUDE:_tls_callback")
+#  else
+#    pragma comment(linker, "/INCLUDE:_tls_used")
+#    pragma comment(linker, "/INCLUDE:" STRINGIFY(tls_callback))
+#  endif
+#  pragma section(".CRT$XLY", long, read)
+#endif
+JEMALLOC_SECTION(".CRT$XLY")
+JEMALLOC_ATTR(used) BOOL(WINAPI *const tls_callback)(
+    HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) = _tls_callback;
+
+/* ====================================================================
+ * Windows static-ctor init lock (.CRT$XCU)
+ *   (folded in from jemalloc_init.c)
+ *
+ * Vista+ uses SRWLOCK_INIT for a compile-time initializer; pre-Vista
+ * needs a runtime constructor scheduled via the .CRT$XCU section table
+ * (and called explicitly from malloc_init_hard as a belt-and-suspenders
+ * guard against constructor ordering races).
+ *
+ * init_lock has external linkage so jemalloc_init.c can lock/unlock it;
+ * see the extern declaration in include/jemalloc/internal/os/windows.h.
+ * ==================================================================== */
+
+#if _WIN32_WINNT >= 0x0600
+malloc_mutex_t init_lock = SRWLOCK_INIT;
+#else
+malloc_mutex_t init_lock;
+static bool    init_lock_initialized = false;
+
+JEMALLOC_ATTR(constructor)
+void WINAPI
+_init_init_lock(void) {
+	/*
+	 * If another constructor in the same binary is using mallctl to e.g.
+	 * set up extent hooks, it may end up running before this one, and
+	 * malloc_init_hard will crash trying to lock the uninitialized lock.
+	 * So we force an initialization of the lock in malloc_init_hard as
+	 * well. We don't try to care about atomicity of the access to the
+	 * init_lock_initialized boolean, since it really only matters early
+	 * in process creation, before any separate thread normally starts
+	 * doing anything.
+	 */
+	if (!init_lock_initialized) {
+		malloc_mutex_init(&init_lock, "init", WITNESS_RANK_INIT,
+		    malloc_mutex_rank_exclusive);
+	}
+	init_lock_initialized = true;
+}
+
+#  ifdef _MSC_VER
+#    pragma section(".CRT$XCU", read)
+JEMALLOC_SECTION(".CRT$XCU")
+JEMALLOC_ATTR(used)
+static const void(WINAPI *init_init_lock)(void) = _init_init_lock;
+#  endif
+#endif

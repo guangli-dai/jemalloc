@@ -8,45 +8,20 @@
 
 /******************************************************************************/
 /*
- * The following functions are used by threading libraries for protection of
- * malloc during fork().
+ * Cross-OS fork hooks. Threading libraries register these via
+ * os_process_register_atfork (POSIX) or via the malloc-zone callbacks
+ * on Darwin (see src/os/darwin.c). FreeBSD libthr's MUTEX_INIT_CB path
+ * additionally exports _malloc_prefork / _malloc_postfork shims that
+ * wrap these — those live in src/os/freebsd.c.
  */
 
-#ifdef JEMALLOC_MUTEX_INIT_CB
-/*
- * When JEMALLOC_MUTEX_INIT_CB is defined, pthread_atfork registration is
- * skipped and the platform calls _malloc_prefork/_malloc_postfork directly.
- * FreeBSD's libthr calls _malloc_postfork in both parent and child.  Detect
- * the child by pid change so we route to jemalloc_postfork_child, which resets
- * per-arena state the parent handler does not touch (nthreads, descriptor
- * queues).  The check is harmless on any platform that only calls
- * _malloc_postfork in the parent.
- */
-static pid_t jemalloc_prefork_pid;
-#endif
-
-#ifndef JEMALLOC_MUTEX_INIT_CB
 void
-jemalloc_prefork(void)
-#else
-JEMALLOC_EXPORT void
-_malloc_prefork(void)
-#endif
-{
+jemalloc_prefork(void) {
 	tsd_t   *tsd;
 	unsigned i, j, narenas;
 	arena_t *arena;
 
-#ifdef JEMALLOC_MUTEX_INIT_CB
-	if (!malloc_initialized()) {
-		return;
-	}
-#endif
 	assert(malloc_initialized());
-
-#ifdef JEMALLOC_MUTEX_INIT_CB
-	jemalloc_prefork_pid = getpid();
-#endif
 
 	tsd = tsd_fetch();
 
@@ -107,26 +82,11 @@ _malloc_prefork(void)
 	stats_prefork(tsd_tsdn(tsd));
 }
 
-#ifndef JEMALLOC_MUTEX_INIT_CB
 void
-jemalloc_postfork_parent(void)
-#else
-JEMALLOC_EXPORT void
-_malloc_postfork(void)
-#endif
-{
+jemalloc_postfork_parent(void) {
 	tsd_t   *tsd;
 	unsigned i, narenas;
 
-#ifdef JEMALLOC_MUTEX_INIT_CB
-	if (!malloc_initialized()) {
-		return;
-	}
-	if (getpid() != jemalloc_prefork_pid) {
-		jemalloc_postfork_child();
-		return;
-	}
-#endif
 	assert(malloc_initialized());
 
 	tsd = tsd_fetch();

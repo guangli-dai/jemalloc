@@ -380,3 +380,43 @@ os_process_register_atfork(void (*prepare)(void), void (*parent)(void),
 /* ====================================================================
  * DSS / sbrk
  * ==================================================================== */
+
+/* ====================================================================
+ * FreeBSD named fork hooks   (folded in from jemalloc_fork.c)
+ *
+ * When JEMALLOC_MUTEX_INIT_CB is defined (FreeBSD libthr), the runtime
+ * calls _malloc_prefork / _malloc_postfork directly rather than going
+ * through pthread_atfork. libthr calls _malloc_postfork in BOTH parent
+ * and child, so we detect the child by pid mismatch and dispatch to
+ * jemalloc_postfork_child manually. The cross-OS bodies live in
+ * src/jemalloc_fork.c.
+ * ==================================================================== */
+#ifdef JEMALLOC_MUTEX_INIT_CB
+
+#include "jemalloc/internal/jemalloc_fork.h"
+#include "jemalloc/internal/jemalloc_init.h"
+
+static pid_t jemalloc_prefork_pid;
+
+JEMALLOC_EXPORT void
+_malloc_prefork(void) {
+	if (!malloc_initialized()) {
+		return;
+	}
+	jemalloc_prefork_pid = getpid();
+	jemalloc_prefork();
+}
+
+JEMALLOC_EXPORT void
+_malloc_postfork(void) {
+	if (!malloc_initialized()) {
+		return;
+	}
+	if (getpid() != jemalloc_prefork_pid) {
+		jemalloc_postfork_child();
+	} else {
+		jemalloc_postfork_parent();
+	}
+}
+
+#endif /* JEMALLOC_MUTEX_INIT_CB */

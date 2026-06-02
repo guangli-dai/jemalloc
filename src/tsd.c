@@ -348,48 +348,10 @@ malloc_tsd_boot1(void) {
 	tsd_slow_update(tsd);
 }
 
-#ifdef _WIN32
-static BOOL WINAPI
-_tls_callback(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {
-	switch (fdwReason) {
-#	ifdef JEMALLOC_LAZY_LOCK
-	case DLL_THREAD_ATTACH:
-		isthreaded = true;
-		break;
-#	endif
-	case DLL_THREAD_DETACH:
-		_malloc_thread_cleanup();
-		break;
-	default:
-		break;
-	}
-	return true;
-}
-
 /*
- * We need to be able to say "read" here (in the "pragma section"), but have
- * hooked "read". We won't read for the rest of the file, so we can get away
- * with unhooking.
+ * Windows DLL TLS callback (.CRT$XLY) moved to src/os/windows.c.
+ * See _tls_callback / tls_callback there.
  */
-#	ifdef read
-#		undef read
-#	endif
-
-#	ifdef _MSC_VER
-#		ifdef _M_IX86
-#			pragma comment(linker, "/INCLUDE:__tls_used")
-#			pragma comment(linker, "/INCLUDE:_tls_callback")
-#		else
-#			pragma comment(linker, "/INCLUDE:_tls_used")
-#			pragma comment(                                       \
-			    linker, "/INCLUDE:" STRINGIFY(tls_callback))
-#		endif
-#		pragma section(".CRT$XLY", long, read)
-#	endif
-JEMALLOC_SECTION(".CRT$XLY")
-JEMALLOC_ATTR(used) BOOL(WINAPI *const tls_callback)(
-    HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) = _tls_callback;
-#endif
 
 #if (!defined(JEMALLOC_MALLOC_THREAD_CLEANUP) && !defined(JEMALLOC_TLS)        \
     && !defined(_WIN32))
