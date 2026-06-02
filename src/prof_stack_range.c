@@ -2,6 +2,7 @@
 #include "jemalloc/internal/jemalloc_internal_includes.h"
 
 #include "jemalloc/internal/malloc_io.h"
+#include "jemalloc/internal/os.h"
 #include "jemalloc/internal/prof_sys.h"
 
 #if defined(__linux__) && defined(JEMALLOC_HAVE_GETTID)
@@ -67,7 +68,7 @@ prof_mapping_containing_addr(uintptr_t addr, const char *maps_path,
 	while (1) {
 		if (fd < 0) {
 			/* case 0: initial open of maps file */
-			fd = malloc_open(maps_path, O_RDONLY);
+			fd = os_file_open(maps_path, O_RDONLY);
 			if (fd < 0) {
 				return errno;
 			}
@@ -143,7 +144,7 @@ prof_mapping_containing_addr(uintptr_t addr, const char *maps_path,
 		}
 	}
 
-	malloc_close(fd);
+	os_file_close(fd);
 	return ret;
 }
 
@@ -159,7 +160,7 @@ prof_thread_stack_range(uintptr_t fp, uintptr_t *low, uintptr_t *high) {
     */
 	char maps_path[64]; // "/proc/<pid>/task/<tid>/maps"
 	malloc_snprintf(maps_path, sizeof(maps_path), "/proc/%d/task/%d/maps",
-	    getpid(), gettid());
+	    os_process_id(), gettid());
 	return prof_mapping_containing_addr(fp, maps_path, low, high);
 }
 

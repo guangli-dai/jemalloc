@@ -180,4 +180,14 @@ os_file_lseek(int fd, off_t offset, int whence) {
 #endif
 }
 
+/* ====================================================================
+ * /proc and /sys reads
+ *
+ * Linux-only kernel introspection (overcommit / THP state). Unsupported on
+ * Darwin: there is no /proc or /sys to read.
+ *
+ * Capability flags: none.
+ * Functions: none.
+ * ==================================================================== */
+
 #endif /* JEMALLOC_INTERNAL_OS_DARWIN_H */

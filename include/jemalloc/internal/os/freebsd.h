@@ -163,4 +163,15 @@ os_file_lseek(int fd, off_t offset, int whence) {
 #endif
 }
 
+/* ====================================================================
+ * /proc and /sys reads
+ *
+ * Unsupported on FreeBSD: there is no /proc + /sys overcommit/THP interface
+ * to read. The overcommit decision comes from sysctl(vm.overcommit) in the
+ * VM section instead.
+ *
+ * Capability flags: none.
+ * Functions: none.
+ * ==================================================================== */
+
 #endif /* JEMALLOC_INTERNAL_OS_FREEBSD_H */

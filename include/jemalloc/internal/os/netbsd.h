@@ -163,4 +163,14 @@ os_file_lseek(int fd, off_t offset, int whence) {
 #endif
 }
 
+/* ====================================================================
+ * /proc and /sys reads
+ *
+ * NetBSD has no /proc + /sys overcommit / hugepage knobs to read, so this
+ * facility is unsupported.
+ *
+ * Capability flags: none.
+ * Functions: none.
+ * ==================================================================== */
+
 #endif /* JEMALLOC_INTERNAL_OS_NETBSD_H */

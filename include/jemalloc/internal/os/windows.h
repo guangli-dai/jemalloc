@@ -119,4 +119,14 @@ os_file_lseek(int fd, off_t offset, int whence) {
 	return lseek(fd, offset, whence);
 }
 
+/* ====================================================================
+ * /proc and /sys reads
+ *
+ * Linux-style /proc + /sys pseudo-files do not exist on Windows; this facility
+ * is unsupported and nothing reads them here.
+ *
+ * Capability flags: none.
+ * Functions: none.
+ * ==================================================================== */
+
 #endif /* JEMALLOC_INTERNAL_OS_WINDOWS_H */

@@ -169,4 +169,17 @@ os_file_lseek(int fd, off_t offset, int whence) {
 #endif
 }
 
+/* ====================================================================
+ * /proc and /sys reads
+ *
+ * Linux exposes /proc/sys/vm/overcommit_memory and
+ * /sys/kernel/mm/transparent_hugepage/enabled. There is no dedicated API:
+ * consumers gate on JEMALLOC_PROC_SYS_VM_OVERCOMMIT_MEMORY /
+ * JEMALLOC_HAVE_MADVISE_HUGE and read these paths with the File I/O
+ * primitives above.
+ *
+ * Capability flags: none.
+ * Functions: none (uses the File I/O section).
+ * ==================================================================== */
+
 #endif /* JEMALLOC_INTERNAL_OS_LINUX_H */

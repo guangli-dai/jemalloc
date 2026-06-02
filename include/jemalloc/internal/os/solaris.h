@@ -163,4 +163,14 @@ os_file_lseek(int fd, off_t offset, int whence) {
 #endif
 }
 
+/* ====================================================================
+ * /proc and /sys reads
+ *
+ * Unsupported on Solaris: there are no /proc + /sys files this layer reads for
+ * boot-time state.
+ *
+ * Capability flags: none.
+ * Functions: none.
+ * ==================================================================== */
+
 #endif /* JEMALLOC_INTERNAL_OS_SOLARIS_H */
