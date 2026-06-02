@@ -485,7 +485,7 @@ static bool
 decay_with_process_madvise(edata_list_inactive_t *decay_extents) {
 	cassert(have_process_madvise);
 	assert(opt_process_madvise_max_batch > 0);
-#ifndef JEMALLOC_HAVE_PROCESS_MADVISE
+#if !OS_VM_HAS_BATCH_PURGE
 	return true;
 #else
 	assert(

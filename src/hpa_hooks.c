@@ -90,11 +90,12 @@ hpa_hooks_ms_since(nstime_t *past_nstime) {
 /* Return true if we did not purge all nbytes, or on some error */
 static bool
 hpa_hooks_vectorized_purge(void *vec, size_t vlen, size_t nbytes) {
-#ifdef JEMALLOC_HAVE_PROCESS_MADVISE
+#if OS_VM_HAS_BATCH_PURGE
 	bool err = pages_purge_process_madvise(vec, vlen, nbytes);
 	JE_USDT(hpa_vectorized_purge, 3, nbytes, vlen, err);
 	return err;
 #else
+	(void)vec; (void)vlen; (void)nbytes;
 	return true;
 #endif
 }
