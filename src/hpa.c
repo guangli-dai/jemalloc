@@ -665,10 +665,23 @@ hpa_try_alloc_one_offset(tsdn_t *tsdn, hpa_shard_t *shard, size_t size,
 	void *addr = hpdata_reserve_alloc_offset(ps, size, alloc_offset);
 	JE_USDT(hpa_alloc, 5, shard->ind, addr, size, hpdata_nactive_get(ps),
 	    hpdata_age_get(ps));
-	edata_init(edata, shard->ind, addr, size, /* slab */ false, SC_NSIZES,
+	/*
+	 * The extent has no arena yet.  Most of the time it is about to be
+	 * returned through pa_alloc(), which stamps the requesting arena on the
+	 * way out -- but the surplus of a batch allocation goes straight into
+	 * the SEC below, where it can sit until some *other* arena asks for it.
+	 * Leaving a stale arena on it in the meantime would be a silent bug, so
+	 * mark it unowned and let edata_arena_ind_get() catch any reader.
+	 *
+	 * The owning shard, on the other hand, is known now and is fixed for
+	 * the life of the extent; it is what hpa_dalloc() routes on.
+	 */
+	edata_init(edata, EDATA_ARENA_IND_UNASSOCIATED, addr, size,
+	    /* slab */ false, SC_NSIZES,
 	    /* sn */ hpdata_age_get(ps), extent_state_active,
 	    /* zeroed */ false, /* committed */ true, EXTENT_PAI_HPA,
 	    EXTENT_NOT_HEAD);
+	edata_hpa_shard_set(edata, hpa_shard_id(shard));
 	edata_ps_set(edata, ps);
 
 	/*
@@ -905,7 +918,15 @@ hpa_assert_results(
 			emap_assert_mapped(tsdn, shard->emap, edata);
 			assert(edata_pai_get(edata) == EXTENT_PAI_HPA);
 			assert(edata_state_get(edata) == extent_state_active);
-			assert(edata_arena_ind_get(edata) == shard->ind);
+			assert(edata_hpa_shard_get(edata)
+			    == hpa_shard_id(shard));
+			/*
+			 * Freshly carved out of a pageslab, so not yet owned by
+			 * any arena; pa_alloc() stamps whichever one it hands
+			 * this to.
+			 */
+			assert(edata_arena_ind_get_maybe_unassociated(edata)
+			    == EDATA_ARENA_IND_UNASSOCIATED);
 			assert(
 			    edata_szind_get_maybe_invalid(edata) == SC_NSIZES);
 			assert(!edata_slab_get(edata));
@@ -988,7 +1009,12 @@ hpa_dalloc_prepare_unlocked(tsdn_t *tsdn, hpa_shard_t *shard, edata_t *edata) {
 
 	assert(edata_pai_get(edata) == EXTENT_PAI_HPA);
 	assert(edata_state_get(edata) == extent_state_active);
-	assert(edata_arena_ind_get(edata) == shard->ind);
+	/*
+	 * Route on the recorded owner, not on the arena: the extent may be on
+	 * its way back from an arena other than the one that created it, or
+	 * from no arena at all (a SEC flush of never-handed-out surplus).
+	 */
+	assert(edata_hpa_shard_get(edata) == hpa_shard_id(shard));
 	assert(edata_szind_get_maybe_invalid(edata) == SC_NSIZES);
 	assert(edata_committed_get(edata));
 	assert(edata_base_get(edata) != NULL);

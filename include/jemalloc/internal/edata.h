@@ -57,6 +57,18 @@ typedef enum extent_head_state_e extent_head_state_t;
 enum extent_pai_e { EXTENT_PAI_PAC = 0, EXTENT_PAI_HPA = 1 };
 typedef enum extent_pai_e extent_pai_t;
 
+/*
+ * Sentinel arena index meaning "this extent does not currently belong to any
+ * arena".  Used for base extents (see edata_binit()), and for HPA extents
+ * between creation and the pa_alloc() that hands them to a caller -- an HPA
+ * extent can sit in the SEC across that window and be handed to a different
+ * arena than the one that created it, so it has no owner in the meantime.
+ *
+ * edata_arena_ind_get() deliberately asserts against this value: reading the
+ * arena of an unowned extent is a bug, and we want it to be a loud one.
+ */
+#define EDATA_ARENA_IND_UNASSOCIATED ((unsigned)((1U << MALLOCX_ARENA_BITS) - 1))
+
 struct e_prof_info_s {
 	/* Time when this was allocated. */
 	nstime_t e_prof_alloc_time;
@@ -116,8 +128,13 @@ struct edata_s {
 	 * s: bin_shard
 	 * h: is_head
 	 * n: pinned
+	 * H: hpa_shard
 	 *
-	 * 00000000 ... 0nhsssss ssffffff ffffiiii iiiitttg zpcbaaaa aaaaaaaa
+	 * Layout with the default page size; widths of i (szind) and f (nfree)
+	 * are derived from SC_NSIZES and LG_PAGE, so H starts higher on
+	 * larger-page configurations.  See the overflow guard below.
+	 *
+	 * 000000HH HHHHHHHH HHnhssss ssffffff ffffiiii iiiitttg zpcbaaaa aaaaaaaa
 	 *
 	 * arena_ind: Arena from which this extent came, or all 1 bits if
 	 *            unassociated.
@@ -226,7 +243,33 @@ struct edata_s {
 #define EDATA_BITS_PINNED_MASK                                                 \
 	MASK(EDATA_BITS_PINNED_WIDTH, EDATA_BITS_PINNED_SHIFT)
 
-#if (EDATA_BITS_PINNED_SHIFT + EDATA_BITS_PINNED_WIDTH > 64)
+/*
+ * Which HPA shard owns this extent.  Only meaningful when the pai bit is
+ * EXTENT_PAI_HPA.
+ *
+ * Allocation is free to pick any shard within the pool a request routes to;
+ * deallocation has no such freedom and must return the extent to the shard
+ * that served it.  Nothing else on the extent records that, so it lives here.
+ *
+ * This is deliberately *not* a reuse of EDATA_BITS_ARENA.  The pai bit could
+ * discriminate a union (arena for PAC, shard for HPA) at zero bit cost, but
+ * arena_ind still has to mean "the arena that requested this extent": the bin
+ * lookup in tcache_bin_flush_small() and arena_dalloc_small(), and every large
+ * free, derive the arena from it.  See the design doc, section 3.2.
+ *
+ * The width here is what bounds the number of HPA shards that can exist at
+ * once; HPA_MAX_SHARDS_TOTAL is derived from it in hpa.h, and the shard count
+ * is clamped to that at boot.  Note the budget tightens on larger-page
+ * configurations, where EDATA_BITS_NFREE_WIDTH grows -- at LG_PAGE=16 this
+ * field ends at bit 62 of 64 -- so the overflow guard below is load-bearing.
+ */
+#define EDATA_BITS_HPA_SHARD_WIDTH 12
+#define EDATA_BITS_HPA_SHARD_SHIFT                                             \
+	(EDATA_BITS_PINNED_WIDTH + EDATA_BITS_PINNED_SHIFT)
+#define EDATA_BITS_HPA_SHARD_MASK                                              \
+	MASK(EDATA_BITS_HPA_SHARD_WIDTH, EDATA_BITS_HPA_SHARD_SHIFT)
+
+#if (EDATA_BITS_HPA_SHARD_SHIFT + EDATA_BITS_HPA_SHARD_WIDTH > 64)
 #error "edata_t e_bits overflow"
 #endif
 
@@ -297,10 +340,21 @@ struct edata_s {
 TYPED_LIST(edata_list_active, edata_t, ql_link_active)
 TYPED_LIST(edata_list_inactive, edata_t, ql_link_inactive)
 
+/*
+ * Reads the arena index without asserting that the extent has one.  Only for
+ * code that legitimately needs to inspect an extent that may be unowned (the
+ * consistency checks around the HPA/SEC handoff); everything else wants
+ * edata_arena_ind_get().
+ */
+static inline unsigned
+edata_arena_ind_get_maybe_unassociated(const edata_t *edata) {
+	return (unsigned)((edata->e_bits & EDATA_BITS_ARENA_MASK)
+	    >> EDATA_BITS_ARENA_SHIFT);
+}
+
 static inline unsigned
 edata_arena_ind_get(const edata_t *edata) {
-	unsigned arena_ind = (unsigned)((edata->e_bits & EDATA_BITS_ARENA_MASK)
-	    >> EDATA_BITS_ARENA_SHIFT);
+	unsigned arena_ind = edata_arena_ind_get_maybe_unassociated(edata);
 	assert(arena_ind < MALLOCX_ARENA_LIMIT);
 
 	return arena_ind;
@@ -415,6 +469,25 @@ static inline extent_pai_t
 edata_pai_get(const edata_t *edata) {
 	return (extent_pai_t)((edata->e_bits & EDATA_BITS_PAI_MASK)
 	    >> EDATA_BITS_PAI_SHIFT);
+}
+
+/*
+ * The HPA shard that owns this extent, and must be the one to take it back.
+ * Set once when the HPA creates the extent, and never changed thereafter --
+ * unlike the arena index, which is restamped on every pa_alloc().
+ */
+static inline unsigned
+edata_hpa_shard_get(const edata_t *edata) {
+	assert(edata_pai_get(edata) == EXTENT_PAI_HPA);
+	return (unsigned)((edata->e_bits & EDATA_BITS_HPA_SHARD_MASK)
+	    >> EDATA_BITS_HPA_SHARD_SHIFT);
+}
+
+static inline void
+edata_hpa_shard_set(edata_t *edata, unsigned hpa_shard_id) {
+	assert(hpa_shard_id < (1U << EDATA_BITS_HPA_SHARD_WIDTH));
+	edata->e_bits = (edata->e_bits & ~EDATA_BITS_HPA_SHARD_MASK)
+	    | ((uint64_t)hpa_shard_id << EDATA_BITS_HPA_SHARD_SHIFT);
 }
 
 static inline bool
@@ -738,7 +811,7 @@ edata_init(edata_t *edata, unsigned arena_ind, void *addr, size_t size,
 static inline void
 edata_binit(
     edata_t *edata, void *addr, size_t bsize, uint64_t sn, bool reused) {
-	edata_arena_ind_set(edata, (1U << MALLOCX_ARENA_BITS) - 1);
+	edata_arena_ind_set(edata, EDATA_ARENA_IND_UNASSOCIATED);
 	edata_addr_set(edata, addr);
 	edata_bsize_set(edata, bsize);
 	edata_slab_set(edata, false);

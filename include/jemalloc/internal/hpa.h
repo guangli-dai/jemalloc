@@ -14,6 +14,14 @@
 #include "jemalloc/internal/sec.h"
 
 /*
+ * The maximum number of HPA shards that can exist at once, across every pool.
+ * Bounded by the edata_t bit budget: every extent records its owning shard in
+ * e_bits, so the id has to fit there.  The actual shard count is clamped to
+ * this at boot.
+ */
+#define HPA_MAX_SHARDS_TOTAL (1U << EDATA_BITS_HPA_SHARD_WIDTH)
+
+/*
  * HPA-specific deferral interval bounds (currently unused).  Deferral tuning
  * is per-allocator policy, so it lives in the HPA header; see deferral.h for
  * the shared deferred-work contract.
@@ -197,6 +205,18 @@ struct hpa_shard_s {
 	 */
 	nstime_t last_time_work_attempted;
 };
+
+/*
+ * This shard's identity, as recorded on every extent it serves so that
+ * deallocation can find its way back here.  Today it coincides with the arena
+ * index, because there is exactly one shard per arena; once shards move into
+ * pools it becomes a flat index into the global shard array.  Callers should
+ * go through this rather than reading ->ind, so that transition is contained.
+ */
+static inline unsigned
+hpa_shard_id(const hpa_shard_t *shard) {
+	return shard->ind;
+}
 
 /*
  * Whether or not the HPA can be used given the current configuration.  This

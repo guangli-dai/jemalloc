@@ -144,6 +144,35 @@ pa_alloc(tsdn_t *tsdn, pa_shard_t *shard, size_t size, size_t alignment,
 	}
 	if (edata != NULL) {
 		assert(edata_size_get(edata) == size);
+		/*
+		 * This is the single point at which an extent acquires an
+		 * owning arena, and it has to happen before anything reads one.
+		 *
+		 * HPA extents arrive unowned: either freshly carved, or served
+		 * from the SEC, where they may have been parked by a different
+		 * arena entirely.  PAC extents come from this arena's own
+		 * caches and already carry the right index.
+		 */
+		if (edata_pai_get(edata) == EXTENT_PAI_HPA) {
+			/*
+			 * Whether it was carved just now or served from the
+			 * SEC, it must have arrived unowned -- an HPA extent
+			 * carrying an arena at this point means someone failed
+			 * to relinquish it on the way in, and we would be
+			 * silently overwriting the evidence.
+			 */
+			assert(edata_arena_ind_get_maybe_unassociated(edata)
+			    == EDATA_ARENA_IND_UNASSOCIATED);
+			edata_arena_ind_set(edata, shard->ind);
+			/*
+			 * Until shards move out of arenas there is exactly one
+			 * per arena, so the owning shard and the requesting
+			 * arena are necessarily the same number.  This assert
+			 * goes away once pools can route across arenas.
+			 */
+			assert(edata_hpa_shard_get(edata) == shard->ind);
+		}
+		assert(edata_arena_ind_get(edata) == shard->ind);
 		pa_nactive_add(shard, size >> LG_PAGE);
 		emap_remap(tsdn, shard->emap, edata, szind, slab);
 		edata_szind_set(edata, szind);
@@ -151,7 +180,6 @@ pa_alloc(tsdn_t *tsdn, pa_shard_t *shard, size_t size, size_t alignment,
 		if (slab && (size > 2 * PAGE)) {
 			emap_register_interior(tsdn, shard->emap, edata, szind);
 		}
-		assert(edata_arena_ind_get(edata) == shard->ind);
 	}
 	return edata;
 }
@@ -231,6 +259,13 @@ pa_dalloc(tsdn_t *tsdn, pa_shard_t *shard, edata_t *edata,
 	edata_szind_set(edata, SC_NSIZES);
 	pa_nactive_sub(shard, edata_size_get(edata) >> LG_PAGE);
 	if (edata_pai_get(edata) == EXTENT_PAI_HPA) {
+		/*
+		 * Relinquish the arena as the extent leaves it.  An HPA extent
+		 * can be cached in the SEC and reissued to a different arena,
+		 * so anything read from here on is stale by construction; make
+		 * that a loud failure rather than a plausible wrong answer.
+		 */
+		edata_arena_ind_set(edata, EDATA_ARENA_IND_UNASSOCIATED);
 		hpa_dalloc(tsdn, &shard->hpa, edata, deferred_work_generated);
 	} else {
 		pac_dalloc(tsdn, &shard->pac, edata, deferred_work_generated);
