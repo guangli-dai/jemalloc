@@ -1,0 +1,348 @@
+#include "test/jemalloc_test.h"
+
+#include "test/hpa_pool.h"
+
+/*
+ * These tests exercise the routing logic in isolation: no shards are
+ * constructed, so no hugepages are mapped.  Everything below builds a pool set
+ * by hand, fills in only the fields the router reads, and checks the two
+ * decisions the design makes -- size to pool, then pool to shard.
+ *
+ * Band bounds are written as multiples of PAGE rather than in bytes, so that
+ * the same tests mean the same thing on a 64 KiB-page build, where a literal
+ * 16 KiB would be smaller than a page and rejected outright.  A multiple of
+ * PAGE is also always an exact page-size class, which is what makes the
+ * boundary assertions below exact rather than approximate.
+ */
+#define POOL_SMALL_MAX (4 * PAGE)  /* 16 KiB with the default page size. */
+#define POOL_MED_MAX   (16 * PAGE) /* 64 KiB with the default page size. */
+
+/*
+ * A real array, so that the pointer arithmetic the tests do to recover a shard
+ * index is defined behaviour.  Nothing is ever dereferenced; only the addresses
+ * matter.  hpa_shard_t is large, so keep this small and size the layouts to
+ * fit.
+ */
+#define TEST_MAX_SHARDS 16
+static hpa_shard_t test_shards[TEST_MAX_SHARDS];
+
+static void
+pool_set_init(hpa_pool_set_t *set, unsigned npools, const size_t *bounds,
+    const unsigned *nshards, hpa_pool_pick_t pick) {
+	memset(set, 0, sizeof(*set));
+	set->npools = npools;
+	size_t   size_min = PAGE;
+	unsigned next_shard = 0;
+	for (unsigned i = 0; i < npools; i++) {
+		set->pools[i].size_min = size_min;
+		set->pools[i].size_max = bounds[i];
+		set->pools[i].first_shard = next_shard;
+		set->pools[i].nshards = nshards[i];
+		set->pools[i].pick = pick;
+		atomic_store_u(&set->pools[i].rr_next, 0, ATOMIC_RELAXED);
+		size_min = bounds[i] + 1;
+		next_shard += nshards[i];
+	}
+	assert_u_le(next_shard, TEST_MAX_SHARDS, "test layout too large");
+	set->nshards_total = next_shard;
+	set->shards = test_shards;
+	/*
+	 * Build the table with the production code, not a copy of it.  An
+	 * earlier version of this file reimplemented the same first-match loop
+	 * here, which meant the table tests below compared the test's answer
+	 * against the test's own answer and would have passed no matter what
+	 * hpa_pool_build_route_table() did.
+	 */
+	hpa_pool_build_route_table(set);
+	set->initialized = true;
+}
+
+/* Which shard index within the whole set did routing pick? */
+static unsigned
+route_to_id(hpa_pool_set_t *set, size_t size, unsigned hint) {
+	hpa_shard_t *shard = hpa_route(set, size, /* slab */ false,
+	    /* szind */ SC_NSIZES, hint);
+	return (unsigned)(shard - set->shards);
+}
+
+TEST_BEGIN(test_route_table_totality) {
+	/*
+	 * Every size the HPA can be asked for must map to exactly one pool.  A
+	 * hole would not crash: pa_alloc() would quietly fall through to the
+	 * PAC, which is correctness-preserving and silently mistuned -- the
+	 * kind of bug that hides for a long time.  So check the whole domain.
+	 */
+	hpa_pool_set_t set;
+	size_t         bounds[] = {POOL_SMALL_MAX, POOL_MED_MAX, HUGEPAGE};
+	unsigned       nshards[] = {4, 2, 1};
+	pool_set_init(&set, 3, bounds, nshards, hpa_pool_pick_arena);
+
+	for (size_t size = PAGE; size <= HUGEPAGE; size += PAGE) {
+		unsigned    key = hpa_route_key(size, false, SC_NSIZES);
+		hpa_pool_t *pool = hpa_pool_lookup(&set, key);
+		expect_ptr_not_null(pool, "size %zu routed nowhere", size);
+		expect_true(size <= pool->size_max,
+		    "size %zu routed to a pool whose band ends at %zu", size,
+		    pool->size_max);
+		expect_true(size >= pool->size_min,
+		    "size %zu routed to a pool whose band starts at %zu", size,
+		    pool->size_min);
+	}
+}
+TEST_END
+
+TEST_BEGIN(test_route_table_matches_linear_scan) {
+	/*
+	 * The table is a precomputed shortcut for "first pool whose band
+	 * reaches this size".  Check the shortcut against the definition at
+	 * every page-size class, not just at the boundaries.
+	 */
+	hpa_pool_set_t set;
+	size_t         bounds[] = {POOL_SMALL_MAX, POOL_MED_MAX, HUGEPAGE};
+	unsigned       nshards[] = {4, 2, 1};
+	pool_set_init(&set, 3, bounds, nshards, hpa_pool_pick_arena);
+
+	for (size_t size = PAGE; size <= HUGEPAGE; size += PAGE) {
+		hpa_pool_t *want = NULL;
+		for (unsigned i = 0; i < set.npools; i++) {
+			if (size <= set.pools[i].size_max) {
+				want = &set.pools[i];
+				break;
+			}
+		}
+		hpa_pool_t *got = hpa_pool_lookup(&set,
+		    hpa_route_key(size, false, SC_NSIZES));
+		expect_ptr_eq(got, want,
+		    "size %zu: table and linear scan disagree", size);
+	}
+}
+TEST_END
+
+TEST_BEGIN(test_route_is_monotonic) {
+	/*
+	 * Pools are size bands, so routing must never go backwards as size
+	 * grows.  A non-monotonic table would mean two sizes interleaving
+	 * across pools, which defeats the segregation the whole design is for.
+	 */
+	hpa_pool_set_t set;
+	size_t         bounds[] = {POOL_SMALL_MAX, POOL_MED_MAX, HUGEPAGE};
+	unsigned       nshards[] = {4, 2, 1};
+	pool_set_init(&set, 3, bounds, nshards, hpa_pool_pick_arena);
+
+	hpa_pool_t *prev = hpa_pool_lookup(&set,
+	    hpa_route_key(PAGE, false, SC_NSIZES));
+	for (size_t size = PAGE; size <= HUGEPAGE; size += PAGE) {
+		hpa_pool_t *pool = hpa_pool_lookup(&set,
+		    hpa_route_key(size, false, SC_NSIZES));
+		expect_true(pool >= prev,
+		    "routing went backwards at size %zu", size);
+		prev = pool;
+	}
+}
+TEST_END
+
+TEST_BEGIN(test_route_boundaries_are_exact) {
+	/* The interesting boundaries are page-size classes, so they land
+	 * exactly: 16 KiB belongs to pool 0, one page more to pool 1. */
+	hpa_pool_set_t set;
+	size_t         bounds[] = {POOL_SMALL_MAX, POOL_MED_MAX, HUGEPAGE};
+	unsigned       nshards[] = {4, 2, 1};
+	pool_set_init(&set, 3, bounds, nshards, hpa_pool_pick_arena);
+
+	expect_ptr_eq(hpa_pool_lookup(&set,
+	    hpa_route_key(POOL_SMALL_MAX, false, SC_NSIZES)), &set.pools[0],
+	    "the small bound should be the top of pool 0");
+	expect_ptr_eq(hpa_pool_lookup(&set,
+	    hpa_route_key(POOL_SMALL_MAX + PAGE, false, SC_NSIZES)),
+	    &set.pools[1], "one page over the small bound should be pool 1");
+	expect_ptr_eq(hpa_pool_lookup(&set,
+	    hpa_route_key(POOL_MED_MAX, false, SC_NSIZES)), &set.pools[1],
+	    "the medium bound should be the top of pool 1");
+	expect_ptr_eq(hpa_pool_lookup(&set,
+	    hpa_route_key(POOL_MED_MAX + PAGE, false, SC_NSIZES)),
+	    &set.pools[2], "one page over the medium bound should be pool 2");
+	expect_ptr_eq(hpa_pool_lookup(&set,
+	    hpa_route_key(HUGEPAGE, false, SC_NSIZES)), &set.pools[2],
+	    "HUGEPAGE should be the top of the last pool");
+}
+TEST_END
+
+TEST_BEGIN(test_pick_stays_within_pool) {
+	/*
+	 * Step 2's freedom is bounded: a pool may pick any of its own shards
+	 * and none of anyone else's.  Straying would hand an extent to a shard
+	 * in the wrong size band, quietly undoing segregation.
+	 */
+	hpa_pool_set_t set;
+	size_t         bounds[] = {POOL_SMALL_MAX, POOL_MED_MAX, HUGEPAGE};
+	unsigned       nshards[] = {4, 2, 1};
+
+	for (int p = 0; p < 2; p++) {
+		hpa_pool_pick_t pick = (p == 0) ? hpa_pool_pick_arena
+		                                : hpa_pool_pick_roundrobin;
+		pool_set_init(&set, 3, bounds, nshards, pick);
+		for (unsigned i = 0; i < set.npools; i++) {
+			hpa_pool_t *pool = &set.pools[i];
+			for (unsigned hint = 0; hint < 64; hint++) {
+				hpa_shard_t *shard = hpa_pool_pick_shard(&set,
+				    pool, hint);
+				unsigned id = (unsigned)(shard - set.shards);
+				expect_true(id >= pool->first_shard
+				        && id < pool->first_shard
+				            + pool->nshards,
+				    "picker %d: pool %u handed out shard %u, "
+				    "outside [%u, %u)", p, i, id,
+				    pool->first_shard,
+				    pool->first_shard + pool->nshards);
+			}
+		}
+	}
+}
+TEST_END
+
+TEST_BEGIN(test_pick_arena_is_identity) {
+	/*
+	 * The identity layout is the control arm for the whole project: one
+	 * pool, one shard per arena, picked by arena index.  Arena i must
+	 * always get shard i, or the "behaviour is unchanged" claim that
+	 * S1-S3 rest on is not true.
+	 */
+	hpa_pool_set_t    set;
+	hpa_pool_layout_t layout;
+	unsigned          narenas = 10;
+	hpa_pool_layout_identity(&layout, narenas);
+
+	expect_u_eq(layout.npools, 1, "identity layout should have one pool");
+	expect_zu_eq(layout.pools[0].size_max, HUGEPAGE,
+	    "identity pool should span everything");
+	expect_u_eq(layout.pools[0].nshards, narenas,
+	    "identity layout should have one shard per arena");
+	expect_d_eq((int)layout.pick, (int)hpa_pool_pick_arena,
+	    "identity layout should pick by arena");
+
+	size_t   bounds[] = {HUGEPAGE};
+	unsigned nshards[] = {narenas};
+	pool_set_init(&set, 1, bounds, nshards, hpa_pool_pick_arena);
+
+	for (unsigned arena = 0; arena < narenas; arena++) {
+		for (size_t size = PAGE; size <= HUGEPAGE; size *= 2) {
+			expect_u_eq(route_to_id(&set, size, arena), arena,
+			    "arena %u, size %zu: identity layout must route to "
+			    "shard %u", arena, size, arena);
+		}
+	}
+}
+TEST_END
+
+TEST_BEGIN(test_pick_roundrobin_spreads) {
+	/*
+	 * Round robin should ignore the hint and cycle.  This is the first
+	 * picker that can make the owning shard differ from the requesting
+	 * arena, which is what the S4 reroute test will lean on.
+	 */
+	hpa_pool_set_t set;
+	size_t         bounds[] = {HUGEPAGE};
+	unsigned       nshards[] = {4};
+	pool_set_init(&set, 1, bounds, nshards, hpa_pool_pick_roundrobin);
+
+	unsigned counts[4] = {0};
+	for (unsigned i = 0; i < 4 * 25; i++) {
+		/* Constant hint: any spreading is the picker's doing. */
+		unsigned id = route_to_id(&set, PAGE, /* hint */ 7);
+		expect_u_lt(id, 4, "shard id out of range");
+		counts[id]++;
+	}
+	for (unsigned i = 0; i < 4; i++) {
+		expect_u_eq(counts[i], 25,
+		    "round robin should have hit shard %u exactly 25 times",
+		    i);
+	}
+}
+TEST_END
+
+TEST_BEGIN(test_single_shard_pool) {
+	/* A one-shard pool is the degenerate case the big band may well want;
+	 * both pickers must collapse to it without dividing by zero. */
+	hpa_pool_set_t set;
+	size_t         bounds[] = {HUGEPAGE};
+	unsigned       nshards[] = {1};
+
+	for (int p = 0; p < 2; p++) {
+		hpa_pool_pick_t pick = (p == 0) ? hpa_pool_pick_arena
+		                                : hpa_pool_pick_roundrobin;
+		pool_set_init(&set, 1, bounds, nshards, pick);
+		for (unsigned hint = 0; hint < 8; hint++) {
+			expect_u_eq(route_to_id(&set, PAGE, hint), 0,
+			    "picker %d: a single-shard pool must always pick "
+			    "shard 0", p);
+		}
+	}
+}
+TEST_END
+
+TEST_BEGIN(test_layout_clamp_respects_the_limit) {
+	/*
+	 * Every shard id has to fit in the extent's owner field, so the clamp
+	 * is not advisory -- exceeding it truncates the recorded owner in a
+	 * release build and routes frees to the wrong shard.
+	 *
+	 * The shape that breaks naive rounding is one huge pool beside several
+	 * tiny ones: flooring each proportional share and then lifting the
+	 * zeroes back up to one adds nearly a whole shard per lift, which the
+	 * floors did not save.  That lands on 4102 against a limit of 4096.
+	 */
+	struct {
+		const char *name;
+		unsigned    npools;
+		unsigned    nshards[HPA_MAX_POOLS];
+	} cases[] = {
+	    {"under the limit, untouched", 3, {4, 2, 1}},
+	    {"uniform, over the limit", 8,
+	        {4095, 4095, 4095, 4095, 4095, 4095, 4095, 4095}},
+	    {"one huge beside seven tiny", 8, {1, 1, 1, 1, 1, 1, 1, 4095}},
+	    {"one huge beside seven tiny, far over", 8,
+	        {1, 1, 1, 1, 1, 1, 1, 4096}},
+	    {"single pool at the limit", 1, {4096}},
+	};
+
+	for (unsigned c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+		hpa_pool_layout_t layout;
+		memset(&layout, 0, sizeof(layout));
+		layout.npools = cases[c].npools;
+		unsigned before = 0;
+		for (unsigned i = 0; i < layout.npools; i++) {
+			layout.pools[i].nshards = cases[c].nshards[i];
+			layout.pools[i].size_max = HUGEPAGE;
+			before += cases[c].nshards[i];
+		}
+
+		hpa_pool_layout_clamp(&layout);
+
+		unsigned after = 0;
+		for (unsigned i = 0; i < layout.npools; i++) {
+			expect_u_gt(layout.pools[i].nshards, 0,
+			    "%s: pool %u was clamped out of existence",
+			    cases[c].name, i);
+			after += layout.pools[i].nshards;
+		}
+		expect_u_le(after, HPA_MAX_SHARDS_TOTAL,
+		    "%s: clamped to %u shards, past the %u limit",
+		    cases[c].name, after, (unsigned)HPA_MAX_SHARDS_TOTAL);
+		if (before <= HPA_MAX_SHARDS_TOTAL) {
+			expect_u_eq(after, before,
+			    "%s: a layout within the limit should be left "
+			    "alone", cases[c].name);
+		}
+	}
+}
+TEST_END
+
+int
+main(void) {
+	return test_no_reentrancy(test_layout_clamp_respects_the_limit,
+	    test_route_table_totality,
+	    test_route_table_matches_linear_scan, test_route_is_monotonic,
+	    test_route_boundaries_are_exact, test_pick_stays_within_pool,
+	    test_pick_arena_is_identity, test_pick_roundrobin_spreads,
+	    test_single_shard_pool);
+}
