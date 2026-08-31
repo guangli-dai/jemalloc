@@ -2,6 +2,7 @@
 
 /* Additional includes for PA functionality */
 #include "jemalloc/internal/pa.h"
+#include "jemalloc/internal/hpa_pool.h"
 #include "jemalloc/internal/tsd.h"
 #include "jemalloc/internal/sz.h"
 #include "jemalloc/internal/base.h"
@@ -87,6 +88,8 @@ static shard_stats_t *g_shard_stats = NULL; /* Per-shard tracking statistics */
 static shard_infrastructure_t *g_shard_infra =
     NULL;                         /* Per-shard PA infrastructure */
 static pa_central_t g_pa_central; /* Global PA central */
+/* The cache every HPA shard draws edata_t from; shared, as in production. */
+static edata_cache_t g_hpa_edata_cache;
 
 /*
  * HPA shard opts used by the microbench. Edit these values to control the
@@ -235,23 +238,39 @@ initialize_pa_infrastructure(int num_shards) {
 			return true;
 		}
 
-		/* Enable HPA for this shard with proper configuration */
-		hpa_shard_opts_t hpa_opts = g_hpa_opts;
+		/* Route this shard's page allocations to the HPA. */
+		pa_shard_set_use_hpa(&g_shard_infra[i].pa_shard, true);
+	}
 
-		sec_opts_t sec_opts = SEC_OPTS_DEFAULT;
-		if (!g_use_sec) {
-			/* Disable SEC by setting nshards to 0 */
-			sec_opts.nshards = 0;
-		}
+	/*
+	 * HPA shards are global now rather than embedded in each pa_shard, so
+	 * build one pool with a shard per pa_shard.  With the arena picker and
+	 * nshards == num_shards, pa_shard i still routes to HPA shard i, which
+	 * is the topology this benchmark has always measured.
+	 */
+	hpa_shard_opts_t hpa_opts = g_hpa_opts;
 
-		if (pa_shard_enable_hpa(tsd_tsdn(tsd_fetch()),
-		        &g_shard_infra[i].pa_shard, &hpa_opts, &sec_opts)) {
-			fprintf(
-			    stderr, "Failed to enable HPA on shard %d\n", i);
-			/* Clean up partially initialized shards */
-			cleanup_pa_infrastructure(num_shards);
-			return true;
-		}
+	sec_opts_t sec_opts = SEC_OPTS_DEFAULT;
+	if (!g_use_sec) {
+		/* Disable SEC by setting nshards to 0 */
+		sec_opts.nshards = 0;
+	}
+
+	if (edata_cache_init(&g_hpa_edata_cache, g_shard_infra[0].base)) {
+		fprintf(stderr, "Failed to init shared HPA edata cache\n");
+		cleanup_pa_infrastructure(num_shards);
+		return true;
+	}
+
+	hpa_pool_layout_t layout;
+	hpa_pool_layout_identity(&layout, (unsigned)num_shards);
+	if (hpa_pools_boot(tsd_tsdn(tsd_fetch()), &hpa_pools_global,
+	        g_shard_infra[0].base, &g_pa_central.hpa,
+	        &jet_arena_emap_global, &g_hpa_edata_cache, &layout, &hpa_opts,
+	        &sec_opts)) {
+		fprintf(stderr, "Failed to boot HPA pools\n");
+		cleanup_pa_infrastructure(num_shards);
+		return true;
 	}
 
 	printf("PA infrastructure configured: HPA=enabled, SEC=%s\n",
@@ -356,14 +375,14 @@ collect_hpa_stats(int shard_id, hpa_shard_stats_t *hpa_stats_out) {
 	/* Clear the output structure */
 	memset(hpa_stats_out, 0, sizeof(hpa_shard_stats_t));
 
-	/* Check if this shard has HPA enabled */
-	if (!g_shard_infra[shard_id].pa_shard.ever_used_hpa) {
+	if (!hpa_pools_ready()
+	    || (unsigned)shard_id >= hpa_pools_global.nshards_total) {
 		return;
 	}
 
-	/* Merge HPA statistics from the shard */
+	/* Shard shard_id in the global pool set serves pa_shard shard_id. */
 	hpa_shard_stats_merge(
-	    tsdn, &g_shard_infra[shard_id].pa_shard.hpa, hpa_stats_out);
+	    tsdn, &hpa_pools_global.shards[shard_id], hpa_stats_out);
 }
 
 static void

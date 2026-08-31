@@ -8,6 +8,7 @@
 #include "jemalloc/internal/edata_cache.h"
 #include "jemalloc/internal/emap.h"
 #include "jemalloc/internal/hpa.h"
+#include "jemalloc/internal/hpa_pool.h"
 #include "jemalloc/internal/lockedint.h"
 #include "jemalloc/internal/pac.h"
 #include "jemalloc/internal/sec.h"
@@ -76,22 +77,14 @@ struct pa_shard_s {
 	atomic_zu_t nactive;
 
 	/*
-	 * Whether or not we should prefer the hugepage allocator.  Atomic since
-	 * it may be concurrently modified by a thread setting extent hooks.
-	 * Note that we still may do HPA operations in this arena; if use_hpa is
-	 * changed from true to false, we'll free back to the hugepage allocator
-	 * for those allocations.
+	 * Whether this arena should route page-level allocations to the HPA.
+	 * Atomic since it may be concurrently modified by a thread setting
+	 * extent hooks.  This is now purely a routing decision: the shards
+	 * themselves live in the global pool set, so turning this off stops
+	 * this arena sending *new* allocations to the HPA and nothing else.
+	 * Extents it already owns keep going home to their own shard.
 	 */
 	atomic_b_t use_hpa;
-
-	/*
-	 * If we never used the HPA to begin with, it wasn't initialized, and so
-	 * we shouldn't try to e.g. acquire its mutexes during fork.  This
-	 * tracks that knowledge.
-	 */
-	bool ever_used_hpa;
-
-	hpa_shard_t hpa;
 
 	/* The source of edata_t objects. */
 	edata_cache_t edata_cache;
@@ -127,15 +120,15 @@ bool pa_shard_init(tsdn_t *tsdn, pa_shard_t *shard, pa_central_t *central,
     ssize_t dirty_decay_ms, ssize_t muzzy_decay_ms);
 
 /*
- * This isn't exposed to users; we allow late enablement of the HPA shard so
- * that we can boot without worrying about the HPA, then turn it on in a0.
+ * Whether this arena routes to the HPA.  Shards are global now, so this only
+ * sets a flag; there is nothing per-arena to construct or tear down.
  */
-bool pa_shard_enable_hpa(tsdn_t *tsdn, pa_shard_t *shard,
-    const hpa_shard_opts_t *hpa_opts, const sec_opts_t *hpa_sec_opts);
+void pa_shard_set_use_hpa(pa_shard_t *shard, bool use_hpa);
 
 /*
  * We stop using the HPA when custom extent hooks are installed, but still
- * redirect deallocations to it.
+ * redirect deallocations to it.  Note this must not flush or disable the
+ * shards themselves: they are shared, and other arenas are still using them.
  */
 void pa_shard_disable_hpa(tsdn_t *tsdn, pa_shard_t *shard);
 
@@ -153,9 +146,12 @@ void pa_shard_reset(tsdn_t *tsdn, pa_shard_t *shard);
 void pa_shard_destroy(tsdn_t *tsdn, pa_shard_t *shard);
 
 /*
- * Flush the shard's front caches (SEC + HPA) back to the ecaches.  If all is
- * true, also fully decay-purge the PAC dirty (and muzzy, unless skipped) extents
- * to the OS -- the "save as much memory as possible" path.
+ * Flush the shard's front cache (the PAC's SEC) back to the ecaches.  If all
+ * is true, also fully decay-purge the PAC dirty (and muzzy, unless skipped)
+ * extents to the OS -- the "save as much memory as possible" path.
+ *
+ * PAC-only: the HPA shards are shared, so flushing them here would throw away
+ * extents cached on behalf of every other arena.
  */
 void pa_shard_flush(tsdn_t *tsdn, pa_shard_t *shard, bool all);
 
@@ -185,8 +181,6 @@ bool    pa_decay_ms_set(tsdn_t *tsdn, pa_shard_t *shard, extent_state_t state,
        ssize_t decay_ms);
 ssize_t pa_decay_ms_get(pa_shard_t *shard, extent_state_t state);
 
-void pa_shard_set_deferral_allowed(
-    tsdn_t *tsdn, pa_shard_t *shard, bool deferral_allowed);
 /*
  * Do deferred work on this PA shard: dispatch to PAC (decay-purge) then HPA.
  * Each allocator owns its own policy -- PAC decides eagerness from
@@ -237,7 +231,7 @@ void pa_shard_basic_stats_merge(
 
 void pa_shard_stats_merge(tsdn_t *tsdn, pa_shard_t *shard,
     pa_shard_stats_t *pa_shard_stats_out, pac_estats_t *estats_out,
-    hpa_shard_stats_t *hpa_stats_out, size_t *resident);
+    size_t *resident);
 
 /*
  * Reads the PA-owned mutex stats into the output stats array, at the

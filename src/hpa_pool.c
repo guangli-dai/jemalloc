@@ -1,5 +1,6 @@
 #include "jemalloc/internal/jemalloc_preamble.h"
 
+#include "jemalloc/internal/deferral.h"
 #include "jemalloc/internal/hpa_pool.h"
 #include "jemalloc/internal/malloc_io.h"
 
@@ -11,7 +12,9 @@ hpa_pool_layout_identity(hpa_pool_layout_t *layout, unsigned narenas) {
 	memset(layout, 0, sizeof(*layout));
 	layout->npools = 1;
 	layout->pools[0].size_max = HUGEPAGE;
-	layout->pools[0].nshards = narenas;
+	layout->pools[0].nshards = narenas < HPA_IDENTITY_MAX_SHARDS
+	    ? narenas
+	    : HPA_IDENTITY_MAX_SHARDS;
 	layout->pick = hpa_pool_pick_arena;
 }
 
@@ -288,4 +291,200 @@ hpa_pool_pick_shard(hpa_pool_set_t *set, hpa_pool_t *pool, unsigned hint) {
 	unsigned id = pool->first_shard + idx;
 	assert(id < set->nshards_total);
 	return &set->shards[id];
+}
+
+/*
+ * The process-wide pool set.  Zero-initialised, so hpa_pools_ready() is false
+ * until hpa_pools_boot() says otherwise -- which matters during bootstrap,
+ * when arena 0 exists before the pools do.
+ */
+hpa_pool_set_t hpa_pools_global;
+
+/*
+ * Fork.  One pass over every shard, at the same phase numbers the per-arena
+ * code used, so the order relative to PAC and arena locks is unchanged.  The
+ * arena walk cannot do this any more: shards are shared, so it would take each
+ * mutex once per arena and deadlock against itself in the parent.
+ */
+void
+hpa_pools_prefork2(tsdn_t *tsdn) {
+	if (!hpa_pools_ready()) {
+		return;
+	}
+	for (unsigned i = 0; i < hpa_pools_global.nshards_total; i++) {
+		hpa_shard_prefork2(tsdn, &hpa_pools_global.shards[i]);
+	}
+}
+
+void
+hpa_pools_prefork3(tsdn_t *tsdn) {
+	if (!hpa_pools_ready()) {
+		return;
+	}
+	for (unsigned i = 0; i < hpa_pools_global.nshards_total; i++) {
+		hpa_shard_prefork3(tsdn, &hpa_pools_global.shards[i]);
+	}
+}
+
+void
+hpa_pools_prefork4(tsdn_t *tsdn) {
+	if (!hpa_pools_ready()) {
+		return;
+	}
+	for (unsigned i = 0; i < hpa_pools_global.nshards_total; i++) {
+		hpa_shard_prefork4(tsdn, &hpa_pools_global.shards[i]);
+	}
+}
+
+/*
+ * The shared edata cache is a lock as well as a lifetime fix, and it is inner
+ * to the shard mutexes: hpa_try_alloc_one_offset() calls
+ * edata_cache_fast_get() while holding one.  So it is taken last, at the same
+ * phase the per-arena caches use.
+ */
+void
+hpa_pools_prefork5(tsdn_t *tsdn) {
+	if (!hpa_pools_ready()) {
+		return;
+	}
+	edata_cache_prefork(tsdn, hpa_pools_global.edata_cache);
+}
+
+void
+hpa_pools_postfork_parent(tsdn_t *tsdn) {
+	if (!hpa_pools_ready()) {
+		return;
+	}
+	edata_cache_postfork_parent(tsdn, hpa_pools_global.edata_cache);
+	for (unsigned i = 0; i < hpa_pools_global.nshards_total; i++) {
+		hpa_shard_postfork_parent(tsdn, &hpa_pools_global.shards[i]);
+	}
+}
+
+void
+hpa_pools_postfork_child(tsdn_t *tsdn) {
+	if (!hpa_pools_ready()) {
+		return;
+	}
+	edata_cache_postfork_child(tsdn, hpa_pools_global.edata_cache);
+	for (unsigned i = 0; i < hpa_pools_global.nshards_total; i++) {
+		hpa_shard_postfork_child(tsdn, &hpa_pools_global.shards[i]);
+	}
+}
+
+void
+hpa_pools_set_deferral_allowed(tsdn_t *tsdn, bool deferral_allowed) {
+	if (!hpa_pools_ready()) {
+		return;
+	}
+	for (unsigned i = 0; i < hpa_pools_global.nshards_total; i++) {
+		hpa_shard_set_deferral_allowed(
+		    tsdn, &hpa_pools_global.shards[i], deferral_allowed);
+	}
+}
+
+/*
+ * Every background thread drives every shard, rather than taking a stripe.
+ *
+ * Striping is what the arena walk does, but it does not transfer: background
+ * threads are created on demand, and only for indices that some *existing
+ * arena* maps to.  A shard whose stripe belongs to a thread that was never
+ * created would simply never be driven -- and the failure is silent, showing
+ * up as RSS climbing over hours rather than as anything a test catches.  That
+ * is exactly the bug this hit in hpa_background_thread.
+ *
+ * Driving everything from each thread is correct regardless of which threads
+ * exist.  The redundancy is cheap: the work is bounded and taken under the
+ * shard mutex, so a second thread finds nothing to do.
+ */
+void
+hpa_pools_do_deferred_work(tsdn_t *tsdn) {
+	if (!hpa_pools_ready()) {
+		return;
+	}
+	for (unsigned i = 0; i < hpa_pools_global.nshards_total; i++) {
+		hpa_shard_do_deferred_work(tsdn, &hpa_pools_global.shards[i]);
+	}
+}
+
+uint64_t
+hpa_pools_time_until_deferred_work(tsdn_t *tsdn) {
+	uint64_t time = DEFERRED_WORK_MAX;
+	if (!hpa_pools_ready()) {
+		return time;
+	}
+	for (unsigned i = 0; i < hpa_pools_global.nshards_total; i++) {
+		uint64_t shard_time = hpa_time_until_deferred_work(
+		    tsdn, &hpa_pools_global.shards[i]);
+		if (shard_time < time) {
+			time = shard_time;
+		}
+		if (time == DEFERRED_WORK_MIN) {
+			break;
+		}
+	}
+	return time;
+}
+
+void
+hpa_pools_stats_merge(tsdn_t *tsdn, hpa_shard_stats_t *dst) {
+	if (!hpa_pools_ready()) {
+		return;
+	}
+	for (unsigned i = 0; i < hpa_pools_global.nshards_total; i++) {
+		hpa_shard_stats_merge(tsdn, &hpa_pools_global.shards[i], dst);
+	}
+}
+
+/*
+ * Dirty pages held across every pool.  Used to keep stats.resident honest:
+ * this used to be folded in per arena, and simply dropping it would have
+ * under-reported memory with nothing failing to say so.
+ */
+size_t
+hpa_pools_ndirty(void) {
+	if (!hpa_pools_ready()) {
+		return 0;
+	}
+	size_t ndirty = 0;
+	for (unsigned i = 0; i < hpa_pools_global.nshards_total; i++) {
+		ndirty += psset_ndirty(&hpa_pools_global.shards[i].psset);
+	}
+	return ndirty;
+}
+
+void
+hpa_pools_flush(tsdn_t *tsdn) {
+	if (!hpa_pools_ready()) {
+		return;
+	}
+	for (unsigned i = 0; i < hpa_pools_global.nshards_total; i++) {
+		hpa_shard_flush(tsdn, &hpa_pools_global.shards[i]);
+	}
+}
+
+/*
+ * "Give back what you can, now."
+ *
+ * The arena-scoped equivalents (arena.<i>.purge and friends) deliberately no
+ * longer reach the HPA: a shard belongs to no arena, so no arena can speak for
+ * it.  That would leave hugepage memory unreachable from mallctl altogether,
+ * which is a capability regression rather than a naming one -- releasing
+ * memory under pressure is something callers actually rely on.  Hence a verb
+ * of its own, scoped the way the resource is.
+ *
+ * Flush first, then force deferred work: flushing returns SEC-cached extents
+ * to their pssets, which is what makes the subsequent purge able to see them.
+ */
+void
+hpa_pools_purge(tsdn_t *tsdn) {
+	if (!hpa_pools_ready()) {
+		return;
+	}
+	for (unsigned i = 0; i < hpa_pools_global.nshards_total; i++) {
+		hpa_shard_flush(tsdn, &hpa_pools_global.shards[i]);
+	}
+	for (unsigned i = 0; i < hpa_pools_global.nshards_total; i++) {
+		hpa_shard_do_deferred_work(tsdn, &hpa_pools_global.shards[i]);
+	}
 }

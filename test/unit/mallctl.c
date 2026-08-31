@@ -1408,6 +1408,27 @@ TEST_BEGIN(test_arena_i_muzzy_decay_ms) {
 }
 TEST_END
 
+TEST_BEGIN(test_hpa_purge) {
+	/*
+	 * HPA shards belong to no arena, so arena.<i>.purge no longer reaches
+	 * them -- including arena.<MALLCTL_ARENAS_ALL>.purge.  This is the
+	 * replacement, and it has to work whether or not the HPA is enabled,
+	 * since callers releasing memory under pressure should not have to
+	 * know the allocator's configuration.
+	 */
+	expect_d_eq(mallctl("hpa.purge", NULL, NULL, NULL, 0), 0,
+	    "Unexpected mallctl() failure");
+
+	size_t val = 0;
+	size_t sz = sizeof(val);
+	expect_d_eq(mallctl("hpa.purge", (void *)&val, &sz, NULL, 0), EPERM,
+	    "hpa.purge should not be readable");
+	expect_d_eq(
+	    mallctl("hpa.purge", NULL, NULL, (void *)&val, sizeof(val)), EPERM,
+	    "hpa.purge should not be writable");
+}
+TEST_END
+
 TEST_BEGIN(test_arena_i_purge) {
 	unsigned narenas;
 	size_t   sz = sizeof(unsigned);
@@ -2072,7 +2093,7 @@ TEST_BEGIN(test_stats_arenas_hpa_shard_counters) {
 	do {                                                                   \
 		t      name;                                                   \
 		size_t sz = sizeof(t);                                         \
-		expect_d_eq(mallctl("stats.arenas.0.hpa_shard." #name,         \
+		expect_d_eq(mallctl("stats.hpa." #name,         \
 		                (void *)&name, &sz, NULL, 0),                  \
 		    0, "Unexpected mallctl() failure");                        \
 	} while (0)
@@ -2097,7 +2118,7 @@ TEST_BEGIN(test_stats_arenas_hpa_shard_slabs) {
 		t      slab##_##name;                                          \
 		size_t sz = sizeof(t);                                         \
 		expect_d_eq(                                                   \
-		    mallctl("stats.arenas.0.hpa_shard." #slab "." #name,       \
+		    mallctl("stats.hpa." #slab "." #name,       \
 		        (void *)&slab##_##name, &sz, NULL, 0),                 \
 		    0, "Unexpected mallctl() failure");                        \
 	} while (0)
@@ -2328,7 +2349,8 @@ main(void) {
 	    test_arena_i_reset_destroy_errors, test_thread_prof_name_errors,
 	    test_ctl_ro_macro_errors,
 	    test_arena_i_dirty_decay_ms, test_arena_i_muzzy_decay_ms,
-	    test_arena_i_purge, test_arena_i_decay, test_arena_i_dss,
+	    test_arena_i_purge, test_hpa_purge, test_arena_i_decay,
+	    test_arena_i_dss,
 	    test_arena_i_name, test_arena_i_retain_grow_limit,
 	    test_arenas_dirty_decay_ms, test_arenas_muzzy_decay_ms,
 	    test_arenas_constants, test_arenas_bin_constants,

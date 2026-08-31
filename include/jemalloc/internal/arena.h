@@ -187,6 +187,13 @@ extern div_info_t arena_binind_div_info[SC_NBINS];
 
 extern emap_t arena_emap_global;
 
+/*
+ * The globals the HPA pool set is built on: hugepage supply, and the edata
+ * cache its shards share.  Both are process-wide and outlive every arena.
+ */
+pa_central_t  *arena_pa_central_get(void);
+edata_cache_t *arena_hpa_edata_cache_get(void);
+
 extern size_t opt_oversize_threshold;
 extern size_t oversize_threshold;
 
@@ -205,8 +212,8 @@ void arena_basic_stats_merge(tsdn_t *tsdn, arena_t *arena, unsigned *nthreads,
 void arena_stats_merge(tsdn_t *tsdn, arena_t *arena, unsigned *nthreads,
     const char **dss, ssize_t *dirty_decay_ms, ssize_t *muzzy_decay_ms,
     size_t *nactive, size_t *ndirty, size_t *nmuzzy, arena_stats_t *astats,
-    bin_stats_data_t *bstats, arena_stats_large_t *lstats, pac_estats_t *estats,
-    hpa_shard_stats_t *hpastats);
+    bin_stats_data_t *bstats, arena_stats_large_t *lstats,
+    pac_estats_t *estats);
 edata_t *arena_extent_alloc_large(
     tsdn_t *tsdn, arena_t *arena, size_t usize, size_t alignment, bool zero);
 void arena_extent_dalloc_large_prep(

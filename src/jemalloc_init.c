@@ -1,5 +1,7 @@
 #include "jemalloc/internal/jemalloc_preamble.h"
 
+#include "jemalloc/internal/hpa_pool.h"
+
 #include "jemalloc/internal/arena.h"
 #include "jemalloc/internal/arenas_management.h"
 #include "jemalloc/internal/background_thread.h"
@@ -569,16 +571,45 @@ malloc_init_hard(void) {
 	}
 	if (opt_hpa) {
 		/*
-		 * We didn't initialize arena 0 hpa_shard in arena_new, because
-		 * background_thread_enabled wasn't initialized yet, but we
-		 * need it to set correct value for deferral_allowed.
+		 * Build every HPA shard, once, here.  This is the only place
+		 * it happens: shards no longer live inside arenas, so there is
+		 * nothing for arena_new() to construct and nothing for arena 0
+		 * to catch up on later.
+		 *
+		 * It has to be after background_thread_boot1(), because
+		 * deferral_allowed depends on whether background threads are
+		 * running -- the same reason arena 0's shard used to be
+		 * deferred to this point.
+		 *
+		 * Constructing the pools before any arena is allowed to route
+		 * to them is also what makes publication ordering a
+		 * non-question: no shard is ever half-built and reachable.
 		 */
-		arena_t         *a0 = arena_get(tsd_tsdn(tsd), 0, false);
 		hpa_shard_opts_t hpa_shard_opts = opt_hpa_opts;
 		hpa_shard_opts.deferral_allowed = background_thread_enabled();
-		if (pa_shard_enable_hpa(tsd_tsdn(tsd), &a0->pa_shard,
-		        &hpa_shard_opts, &opt_hpa_sec_opts)) {
+
+		hpa_pool_layout_t layout;
+		hpa_pool_layout_identity(&layout, narenas_total_get());
+
+		if (hpa_pools_boot(tsd_tsdn(tsd), &hpa_pools_global, b0get(),
+		        &arena_pa_central_get()->hpa, &arena_emap_global,
+		        arena_hpa_edata_cache_get(), &layout, &hpa_shard_opts,
+		        &opt_hpa_sec_opts)) {
 			UNLOCK_RETURN(tsd_tsdn(tsd), true, true)
+		}
+
+		/*
+		 * Arenas that already exist were created before the pools did
+		 * -- arena 0 and, if configured, the oversize arena -- so they
+		 * could not enable HPA routing at the time.  Now they can.
+		 */
+		unsigned narenas = narenas_total_get();
+		for (unsigned i = 0; i < narenas; i++) {
+			arena_t *arena = arena_get(tsd_tsdn(tsd), i, false);
+			if (arena != NULL
+			    && ehooks_are_default(arena_get_ehooks(arena))) {
+				pa_shard_set_use_hpa(&arena->pa_shard, true);
+			}
 		}
 	}
 	if (config_prof && prof_boot2(tsd, b0get())) {

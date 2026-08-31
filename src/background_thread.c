@@ -4,6 +4,7 @@
 #include "jemalloc/internal/arenas_management.h"
 #include "jemalloc/internal/assert.h"
 #include "jemalloc/internal/background_thread.h"
+#include "jemalloc/internal/hpa_pool.h"
 #include "jemalloc/internal/background_thread_inlines.h"
 #include "jemalloc/internal/ctl.h"
 #include "jemalloc/internal/deferral.h"
@@ -343,6 +344,24 @@ background_work_sleep_once(
 	uint64_t ns_until_deferred = DEFERRED_WORK_MAX;
 	unsigned narenas = narenas_total_get();
 	bool     slept_indefinitely = background_thread_indefinite_sleep(info);
+
+	/*
+	 * HPA shards are shared across arenas, so they get their own stripe
+	 * over the pool set rather than being driven from the arena walk --
+	 * which would drive each shard once per arena.  The opposite mistake
+	 * is quieter and worse: drop them from the walk without adding this
+	 * pass and deferred work simply never runs, which surfaces as RSS
+	 * growth over hours rather than as a failing test.
+	 */
+	if (!slept_indefinitely) {
+		hpa_pools_do_deferred_work(tsdn);
+	}
+	{
+		uint64_t ns_hpa = hpa_pools_time_until_deferred_work(tsdn);
+		if (ns_hpa < ns_until_deferred) {
+			ns_until_deferred = ns_hpa;
+		}
+	}
 
 	for (unsigned i = ind; i < narenas; i += max_background_threads) {
 		arena_t *arena = arena_get(tsdn, i, false);
@@ -734,13 +753,8 @@ background_threads_enable(tsd_t *tsd) {
 	if (err) {
 		return true;
 	}
-	for (unsigned i = 0; i < narenas; i++) {
-		arena_t *arena = arena_get(tsd_tsdn(tsd), i, false);
-		if (arena != NULL) {
-			pa_shard_set_deferral_allowed(
-			    tsd_tsdn(tsd), &arena->pa_shard, true);
-		}
-	}
+	/* Deferral is a property of the shards, so it is set once. */
+	hpa_pools_set_deferral_allowed(tsd_tsdn(tsd), true);
 	return false;
 }
 
@@ -755,14 +769,7 @@ background_threads_disable(tsd_t *tsd) {
 		return true;
 	}
 	assert(n_background_threads == 0);
-	unsigned narenas = narenas_total_get();
-	for (unsigned i = 0; i < narenas; i++) {
-		arena_t *arena = arena_get(tsd_tsdn(tsd), i, false);
-		if (arena != NULL) {
-			pa_shard_set_deferral_allowed(
-			    tsd_tsdn(tsd), &arena->pa_shard, false);
-		}
-	}
+	hpa_pools_set_deferral_allowed(tsd_tsdn(tsd), false);
 
 	return false;
 }

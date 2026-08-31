@@ -90,6 +90,23 @@ extern const char *const hpa_pool_pick_names[];
 /* A cap on pools, purely so the set can be a fixed-size struct. */
 #define HPA_MAX_POOLS 8
 
+/*
+ * Ceiling on the identity layout's shard count.
+ *
+ * Shards used to be created with their arena, so a process with narenas=704
+ * but five live arenas had five shards.  Pools are built once at boot and
+ * cannot know which arenas will ever exist, so sizing the identity layout at
+ * narenas would allocate 704 of them -- roughly 7 MiB of psset and SEC
+ * metadata for a process that will use a handful.
+ *
+ * Capping trades exact topology preservation for bounded memory: above this
+ * many arenas, several share a shard.  That is a real deviation from the
+ * pre-pool behaviour and is called out in the design docs; it is also, for
+ * what it is worth, the direction this project is trying to go, since a
+ * shard per arena is what hurts hugepage locality in the first place.
+ */
+#define HPA_IDENTITY_MAX_SHARDS 64
+
 typedef struct hpa_pool_s hpa_pool_t;
 struct hpa_pool_s {
 	/*
@@ -167,6 +184,71 @@ struct hpa_pool_set_s {
 	/* Step 1's table.  Indexed by hpa_route_key(). */
 	hpa_pool_t *pool_by_key[HPA_ROUTE_NKEYS];
 };
+
+/*
+ * The one pool set.  Built once by hpa_pools_boot() before any arena is
+ * allowed to route to the HPA, and never resized, which is what makes
+ * publication ordering a non-question: there is no window in which a shard is
+ * half-initialised and reachable.
+ */
+extern hpa_pool_set_t hpa_pools_global;
+
+static inline bool
+hpa_pools_ready(void) {
+	return hpa_pools_global.initialized;
+}
+
+/*
+ * The deallocation side of routing, and the reason the owning shard is
+ * recorded on the extent at all.  One indexed load; no pool lookup, because
+ * getting an extent home does not depend on which pool it came from.
+ */
+JEMALLOC_ALWAYS_INLINE hpa_shard_t *
+hpa_shard_from_edata(const edata_t *edata) {
+	assert(edata_pai_get(edata) == EXTENT_PAI_HPA);
+	assert(hpa_pools_global.initialized);
+	unsigned id = edata_hpa_shard_get(edata);
+	assert(id < hpa_pools_global.nshards_total);
+	return &hpa_pools_global.shards[id];
+}
+
+/*
+ * Fork.  Shards are shared, so each mutex must be taken exactly once rather
+ * than once per arena -- the arena walk that used to do this would now
+ * self-deadlock.  Phase numbers match the arena ones so the order relative to
+ * PAC and arena locks is unchanged: 2 = SEC, 3 = grow, 4 = shard, and 5 for
+ * the shared edata cache, which is strictly inner to the shard mutex
+ * (WITNESS_RANK_EDATA_CACHE vs WITNESS_RANK_HPA_SHARD) because
+ * edata_cache_fast_get() runs while a shard mutex is held.
+ */
+void hpa_pools_prefork2(tsdn_t *tsdn);
+void hpa_pools_prefork3(tsdn_t *tsdn);
+void hpa_pools_prefork4(tsdn_t *tsdn);
+void hpa_pools_prefork5(tsdn_t *tsdn);
+void hpa_pools_postfork_parent(tsdn_t *tsdn);
+void hpa_pools_postfork_child(tsdn_t *tsdn);
+
+/* Deferred work, driven once per shard rather than once per arena. */
+void hpa_pools_set_deferral_allowed(tsdn_t *tsdn, bool deferral_allowed);
+void     hpa_pools_do_deferred_work(tsdn_t *tsdn);
+uint64_t hpa_pools_time_until_deferred_work(tsdn_t *tsdn);
+
+/*
+ * Stats.  These are process-wide now: an HPA shard belongs to a pool, not an
+ * arena, so there is no per-arena HPA figure to report.  hpa_pools_ndirty()
+ * exists because dropping the HPA contribution from the arena walk would
+ * silently under-report stats.resident.
+ */
+void   hpa_pools_stats_merge(tsdn_t *tsdn, hpa_shard_stats_t *dst);
+size_t hpa_pools_ndirty(void);
+void   hpa_pools_flush(tsdn_t *tsdn);
+
+/*
+ * Flush every shard's SEC and then force its deferred work.  Backs the
+ * hpa.purge mallctl -- the HPA-scoped replacement for what arena.<i>.purge
+ * used to reach.
+ */
+void hpa_pools_purge(tsdn_t *tsdn);
 
 /*
  * The identity layout: one pool spanning everything, one shard per arena,

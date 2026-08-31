@@ -18,17 +18,11 @@ pa_shard_prefork0(tsdn_t *tsdn, pa_shard_t *shard) {
 void
 pa_shard_prefork2(tsdn_t *tsdn, pa_shard_t *shard) {
 	sec_prefork2(tsdn, &shard->pac.sec);
-	if (shard->ever_used_hpa) {
-		hpa_shard_prefork2(tsdn, &shard->hpa);
-	}
 }
 
 void
 pa_shard_prefork3(tsdn_t *tsdn, pa_shard_t *shard) {
 	malloc_mutex_prefork(tsdn, &shard->pac.grow_mtx);
-	if (shard->ever_used_hpa) {
-		hpa_shard_prefork3(tsdn, &shard->hpa);
-	}
 }
 
 void
@@ -37,9 +31,6 @@ pa_shard_prefork4(tsdn_t *tsdn, pa_shard_t *shard) {
 	ecache_prefork(tsdn, &shard->pac.ecache_muzzy);
 	ecache_prefork(tsdn, &shard->pac.ecache_retained);
 	ecache_prefork(tsdn, &shard->pac.ecache_pinned);
-	if (shard->ever_used_hpa) {
-		hpa_shard_prefork4(tsdn, &shard->hpa);
-	}
 }
 
 void
@@ -58,9 +49,6 @@ pa_shard_postfork_parent(tsdn_t *tsdn, pa_shard_t *shard) {
 	sec_postfork_parent(tsdn, &shard->pac.sec);
 	malloc_mutex_postfork_parent(tsdn, &shard->pac.decay_dirty.mtx);
 	malloc_mutex_postfork_parent(tsdn, &shard->pac.decay_muzzy.mtx);
-	if (shard->ever_used_hpa) {
-		hpa_shard_postfork_parent(tsdn, &shard->hpa);
-	}
 }
 
 void
@@ -74,9 +62,6 @@ pa_shard_postfork_child(tsdn_t *tsdn, pa_shard_t *shard) {
 	sec_postfork_child(tsdn, &shard->pac.sec);
 	malloc_mutex_postfork_child(tsdn, &shard->pac.decay_dirty.mtx);
 	malloc_mutex_postfork_child(tsdn, &shard->pac.decay_muzzy.mtx);
-	if (shard->ever_used_hpa) {
-		hpa_shard_postfork_child(tsdn, &shard->hpa);
-	}
 }
 
 size_t
@@ -94,13 +79,16 @@ pac_sec_dirty_npages_get(const sec_stats_t *stats) {
 	return (stats->bytes - pac_sec_pinned_bytes_get(stats)) >> LG_PAGE;
 }
 
+/*
+ * PAC only.  HPA dirty pages are no longer attributable to an arena -- a shard
+ * serves every arena that routes to its pool -- so they are counted once,
+ * process-wide, by hpa_pools_ndirty(); ctl folds that into stats.resident.
+ * Dropping them here without adding them back there would silently
+ * under-report memory, with nothing failing to say so.
+ */
 static size_t
 pa_shard_ndirty_no_pac_sec(const pa_shard_t *shard) {
-	size_t ndirty = ecache_npages_get(&shard->pac.ecache_dirty);
-	if (shard->ever_used_hpa) {
-		ndirty += psset_ndirty(&shard->hpa.psset);
-	}
-	return ndirty;
+	return ecache_npages_get(&shard->pac.ecache_dirty);
 }
 
 static size_t
@@ -127,7 +115,7 @@ pa_shard_basic_stats_merge(
 void
 pa_shard_stats_merge(tsdn_t *tsdn, pa_shard_t *shard,
     pa_shard_stats_t *pa_shard_stats_out, pac_estats_t *estats_out,
-    hpa_shard_stats_t *hpa_stats_out, size_t *resident) {
+    size_t *resident) {
 	cassert(config_stats);
 
 	sec_stats_t pac_sec_stats = {0};
@@ -220,9 +208,6 @@ pa_shard_stats_merge(tsdn_t *tsdn, pa_shard_t *shard,
 		estats_out[i].pinned_bytes = pinned_bytes;
 	}
 
-	if (shard->ever_used_hpa) {
-		hpa_shard_stats_merge(tsdn, &shard->hpa, hpa_stats_out);
-	}
 }
 
 static void
@@ -254,13 +239,9 @@ pa_shard_mtx_stats_read(tsdn_t *tsdn, pa_shard_t *shard,
 	sec_mutex_stats_read(tsdn, &shard->pac.sec,
 	    &mutex_prof_data[arena_prof_mutex_pac_sec]);
 
-	if (shard->ever_used_hpa) {
-		pa_shard_mtx_stats_read_single(tsdn, mutex_prof_data,
-		    &shard->hpa.mtx, arena_prof_mutex_hpa_shard);
-		pa_shard_mtx_stats_read_single(tsdn, mutex_prof_data,
-		    &shard->hpa.grow_mtx,
-		    arena_prof_mutex_hpa_shard_grow);
-		sec_mutex_stats_read(tsdn, &shard->hpa.sec,
-		    &mutex_prof_data[arena_prof_mutex_hpa_sec]);
-	}
+	/*
+	 * The HPA mutexes are not this arena's to report: one shard is
+	 * contended by every arena routing to its pool.  They are reported
+	 * process-wide instead.
+	 */
 }

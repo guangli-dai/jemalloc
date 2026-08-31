@@ -1,5 +1,7 @@
 #include "jemalloc/internal/jemalloc_preamble.h"
 
+#include "jemalloc/internal/hpa_pool.h"
+
 #include "jemalloc/internal/arena.h"
 #include "jemalloc/internal/arenas_management.h"
 #include "jemalloc/internal/background_thread.h"
@@ -70,8 +72,37 @@ _malloc_prefork(void)
 	if (have_background_thread) {
 		background_thread_prefork1(tsd_tsdn(tsd));
 	}
-	/* Break arena prefork into stages to preserve lock order. */
+	/*
+	 * Break arena prefork into stages to preserve lock order.
+	 *
+	 * The HPA shards are shared across arenas now, so they cannot be
+	 * locked from inside this walk -- that would take each mutex once per
+	 * arena and deadlock against itself.  They get one pass per stage
+	 * instead, at the stage numbers the per-arena code used, so the order
+	 * relative to the PAC and arena locks is unchanged.
+	 */
 	for (i = 0; i < 9; i++) {
+		switch (i) {
+		case 2:
+			hpa_pools_prefork2(tsd_tsdn(tsd));
+			break;
+		case 3:
+			hpa_pools_prefork3(tsd_tsdn(tsd));
+			break;
+		case 4:
+			hpa_pools_prefork4(tsd_tsdn(tsd));
+			break;
+		case 5:
+			/*
+			 * The shared edata cache is inner to the shard
+			 * mutexes: edata_cache_fast_get() runs while one is
+			 * held.  Same stage the per-arena caches use.
+			 */
+			hpa_pools_prefork5(tsd_tsdn(tsd));
+			break;
+		default:
+			break;
+		}
 		for (j = 0; j < narenas; j++) {
 			if ((arena = arena_get(tsd_tsdn(tsd), j, false))
 			    != NULL) {
@@ -140,6 +171,8 @@ _malloc_postfork(void)
 	witness_postfork_parent(tsd_witness_tsdp_get(tsd));
 	/* Release all mutexes, now that fork() has completed. */
 	stats_postfork_parent(tsd_tsdn(tsd));
+	/* Shared shards: released once, not once per arena. */
+	hpa_pools_postfork_parent(tsd_tsdn(tsd));
 	for (i = 0, narenas = narenas_total_get(); i < narenas; i++) {
 		arena_t *arena;
 
@@ -168,6 +201,8 @@ jemalloc_postfork_child(void) {
 	witness_postfork_child(tsd_witness_tsdp_get(tsd));
 	/* Release all mutexes, now that fork() has completed. */
 	stats_postfork_child(tsd_tsdn(tsd));
+	/* Shared shards: released once, not once per arena. */
+	hpa_pools_postfork_child(tsd_tsdn(tsd));
 	for (i = 0, narenas = narenas_total_get(); i < narenas; i++) {
 		arena_t *arena;
 

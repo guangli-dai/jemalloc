@@ -655,7 +655,7 @@ static const char *const merged_keys[] = {"nthreads", "uptime_ns", "dss",
 	"retained", "pinned", "base", "internal", "metadata_edata",
 	"metadata_rtree", "metadata_thp", "tcache_bytes",
 	"tcache_stashed_bytes", "resident", "abandoned_vm", "extent_avail",
-	"mutexes", "bins", "lextents", "extents", "hpa_shard"};
+	"mutexes", "bins", "lextents", "extents"};
 static const char *const pac_sec_keys[] = {"pac_sec_bytes", "pac_sec_hits",
 	"pac_sec_misses", "pac_sec_dalloc_noflush", "pac_sec_dalloc_flush"};
 
@@ -818,7 +818,7 @@ TEST_BEGIN(test_json_stats_arenas_and_options) {
 	    {"Jl", option_parent_merged, "lextents"},
 	    {"Jx", option_parent_stats, "mutexes"},
 	    {"Je", option_parent_merged, "extents"},
-	    {"Jh", option_parent_merged, "hpa_shard"},
+	    {"Jh", option_parent_stats, "hpa"},
 	    {"Jmda", option_parent_jemalloc, "stats.arenas"},
 	};
 	for (size_t i = 0; i < ARRAY_COUNT(cases); i++) {
@@ -845,7 +845,7 @@ TEST_BEGIN(test_json_stats_global_and_arena) {
 	const char *const stats_keys[] = {"allocated", "active", "metadata",
 	    "metadata_edata", "metadata_rtree", "metadata_thp", "resident",
 	    "mapped", "retained", "pinned", "zero_reallocs",
-	    "background_thread", "mutexes"};
+	    "background_thread", "mutexes", "hpa"};
 	expect_json_object_keys(
 	    stats, stats_keys, ARRAY_COUNT(stats_keys), "stats");
 	expect_json_ctl_fields(
@@ -956,12 +956,12 @@ static const ctl_field_t hpa_fields[] = {
 };
 
 static const ctl_field_t hpa_sec_fields[] = {
-	{"sec_bytes", "hpa_sec_bytes", ctl_field_size},
-	{"sec_hits", "hpa_sec_hits", ctl_field_size},
-	{"sec_misses", "hpa_sec_misses", ctl_field_size},
-	{"sec_dalloc_noflush", "hpa_sec_dalloc_noflush", ctl_field_size},
-	{"sec_dalloc_flush", "hpa_sec_dalloc_flush", ctl_field_size},
-	{"sec_overfills", "hpa_sec_overfills", ctl_field_size},
+	{"sec_bytes", "sec_bytes", ctl_field_size},
+	{"sec_hits", "sec_hits", ctl_field_size},
+	{"sec_misses", "sec_misses", ctl_field_size},
+	{"sec_dalloc_noflush", "sec_dalloc_noflush", ctl_field_size},
+	{"sec_dalloc_flush", "sec_dalloc_flush", ctl_field_size},
+	{"sec_overfills", "sec_overfills", ctl_field_size},
 };
 
 static const ctl_field_t hpa_slab_fields[] = {
@@ -1040,42 +1040,42 @@ TEST_BEGIN(test_json_stats_hpa) {
 		return;
 	}
 
+	/*
+	 * HPA stats hang off the top-level "stats" object now, not off an
+	 * arena: a shard serves every arena routing to its pool, so there was
+	 * never a per-arena share to report once shards became shared.
+	 */
+	(void)merged;
 	json_fragment_t hpa;
-	expect_false(json_object_member(merged, "hpa_shard", &hpa),
-	    "merged arena stats are missing hpa_shard");
+	expect_false(json_object_member(stats, "hpa", &hpa),
+	    "runtime stats are missing hpa");
 	const char *const hpa_keys[] = {"sec_bytes", "sec_hits", "sec_misses",
 	    "sec_dalloc_noflush", "sec_dalloc_flush", "sec_overfills",
 	    "npageslabs", "nactive", "ndirty", "npurge_passes", "npurges",
 	    "nhugifies", "nhugify_failures", "ndehugifies", "slabs",
 	    "extent_allocation_distribution", "full_slabs", "empty_slabs",
 	    "nonfull_slabs"};
-	expect_json_object_keys(
-	    hpa, hpa_keys, ARRAY_COUNT(hpa_keys), "hpa_shard");
+	expect_json_object_keys(hpa, hpa_keys, ARRAY_COUNT(hpa_keys), "hpa");
 
-	char arena_prefix[64];
-	malloc_snprintf(arena_prefix, sizeof(arena_prefix), "stats.arenas.%u",
-	    MALLCTL_ARENAS_ALL);
-	expect_json_ctl_fields(hpa, arena_prefix, hpa_sec_fields,
+	const char *hpa_prefix = "stats.hpa";
+	expect_json_ctl_fields(hpa, hpa_prefix, hpa_sec_fields,
 	    ARRAY_COUNT(hpa_sec_fields));
-	char hpa_prefix[96];
-	malloc_snprintf(
-	    hpa_prefix, sizeof(hpa_prefix), "%s.hpa_shard", arena_prefix);
 	expect_json_ctl_fields(
 	    hpa, hpa_prefix, hpa_fields, ARRAY_COUNT(hpa_fields));
 
 	json_fragment_t slabs;
 	expect_false(json_object_member(hpa, "slabs", &slabs),
-	    "hpa_shard is missing slabs");
+	    "hpa is missing slabs");
 	char slab_prefix[128];
 	malloc_snprintf(
 	    slab_prefix, sizeof(slab_prefix), "%s.slabs", hpa_prefix);
-	expect_hpa_slab(slabs, slab_prefix, "hpa_shard.slabs", false);
+	expect_hpa_slab(slabs, slab_prefix, "hpa.slabs", false);
 
 	const char *const summary_names[] = {"full_slabs", "empty_slabs"};
 	for (size_t i = 0; i < ARRAY_COUNT(summary_names); i++) {
 		json_fragment_t summary;
 		expect_false(json_object_member(hpa, summary_names[i], &summary),
-		    "hpa_shard is missing %s", summary_names[i]);
+		    "hpa is missing %s", summary_names[i]);
 		malloc_snprintf(slab_prefix, sizeof(slab_prefix), "%s.%s",
 		    hpa_prefix, summary_names[i]);
 		expect_hpa_slab(summary, slab_prefix, summary_names[i], true);
@@ -1086,7 +1086,7 @@ TEST_BEGIN(test_json_stats_hpa) {
 
 	json_fragment_t nonfull;
 	expect_false(json_object_member(hpa, "nonfull_slabs", &nonfull),
-	    "hpa_shard is missing nonfull_slabs");
+	    "hpa is missing nonfull_slabs");
 	size_t nonfull_count = PSSET_NPSIZES < SC_NPSIZES ? PSSET_NPSIZES
 	                                                  : SC_NPSIZES;
 	expect_zu_eq(json_array_size(nonfull), nonfull_count,
@@ -1109,7 +1109,7 @@ TEST_BEGIN(test_json_stats_hpa) {
 	json_fragment_t distribution;
 	expect_false(json_object_member(
 	                 hpa, "extent_allocation_distribution", &distribution),
-	    "hpa_shard is missing extent_allocation_distribution");
+	    "hpa is missing extent_allocation_distribution");
 	expect_zu_eq(json_array_size(distribution), SEC_MAX_NALLOCS + 1,
 	    "extent_allocation_distribution has an unexpected row count");
 	for (size_t i = 0; i <= SEC_MAX_NALLOCS; i++) {

@@ -67,6 +67,14 @@ typedef struct ctl_stats_s {
 
 	background_thread_stats_t background_thread;
 	mutex_prof_data_t mutex_prof_data[mutex_prof_num_global_mutexes];
+
+	/*
+	 * HPA figures are process-wide, not per arena: a shard serves every
+	 * arena that routes to its pool, so there is no per-arena share to
+	 * attribute.  Reported under stats.hpa rather than
+	 * stats.arenas.<i>.hpa_shard, which no longer means anything.
+	 */
+	hpa_shard_stats_t hpastats;
 } ctl_stats_t;
 
 typedef struct ctl_arena_s ctl_arena_t;

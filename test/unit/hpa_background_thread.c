@@ -1,6 +1,8 @@
 #include "test/jemalloc_test.h"
 #include "test/sleep.h"
 
+#include "jemalloc/internal/hpa_pool.h"
+
 TEST_BEGIN(test_hpa_background_thread_a0_initialized) {
 	/*
 	 * Arena 0 has dedicated initialization path.  We'd like to make sure
@@ -18,11 +20,18 @@ TEST_BEGIN(test_hpa_background_thread_a0_initialized) {
 	expect_d_eq(err, 0, "Unexpected mallctl() failure");
 	expect_true(enabled, "Background thread should be enabled");
 
-	arena_t *a0 = arena_get(TSDN_NULL, 0, false);
-	expect_ptr_ne(a0, NULL, "");
-	bool deferral_allowed = a0->pa_shard.hpa.opts.deferral_allowed;
-	expect_true(deferral_allowed,
-	    "Should have deferral_allowed option enabled for arena #0");
+	/*
+	 * Shards are global now, built once at boot, so there is no longer an
+	 * arena-0 special case to get wrong -- but the property this test was
+	 * protecting still matters: deferral_allowed has to be right from the
+	 * first allocation, not set later.
+	 */
+	expect_true(hpa_pools_ready(), "HPA pools should be built by now");
+	expect_u_gt(hpa_pools_global.nshards_total, 0, "");
+	for (unsigned i = 0; i < hpa_pools_global.nshards_total; i++) {
+		expect_true(hpa_pools_global.shards[i].opts.deferral_allowed,
+		    "shard %u should have deferral_allowed set at startup", i);
+	}
 }
 TEST_END
 
@@ -46,39 +55,32 @@ create_arena(void) {
 	return arena_ind;
 }
 
+/*
+ * Empty-pageslab dirty pages on the shard this arena routes to.
+ *
+ * This used to be stats.arenas.<i>.hpa_shard, which was exactly this arena's
+ * work because each arena owned a shard.  Shards are shared now, so the CTL
+ * figure is process-wide and includes whatever arena 0 has been doing --
+ * which is fatal for a test that asserts the count starts and ends at zero.
+ * Read the shard directly instead; the arena is freshly created and is the
+ * only thing driving it.
+ */
+static hpa_shard_t *
+test_shard(unsigned arena_ind) {
+	return hpa_route(&hpa_pools_global, PAGE, /* slab */ false, SC_NSIZES,
+	    /* hint */ arena_ind);
+}
+
 static size_t
 get_empty_ndirty(unsigned arena_ind) {
-	int      err;
-	size_t   ndirty_huge;
-	size_t   ndirty_nonhuge;
 	uint64_t epoch = 1;
 	size_t   sz = sizeof(epoch);
-	err = je_mallctl(
-	    "epoch", (void *)&epoch, &sz, (void *)&epoch, sizeof(epoch));
+	int      err = je_mallctl(
+            "epoch", (void *)&epoch, &sz, (void *)&epoch, sizeof(epoch));
 	expect_d_eq(0, err, "Unexpected mallctl() failure");
 
-	size_t mib[6];
-	size_t miblen = sizeof(mib) / sizeof(mib[0]);
-	err = mallctlnametomib(
-	    "stats.arenas.0.hpa_shard.empty_slabs.ndirty_nonhuge", mib,
-	    &miblen);
-	expect_d_eq(0, err, "Unexpected mallctlnametomib() failure");
-
-	sz = sizeof(ndirty_nonhuge);
-	mib[2] = arena_ind;
-	err = mallctlbymib(mib, miblen, &ndirty_nonhuge, &sz, NULL, 0);
-	expect_d_eq(0, err, "Unexpected mallctlbymib() failure");
-
-	err = mallctlnametomib(
-	    "stats.arenas.0.hpa_shard.empty_slabs.ndirty_huge", mib, &miblen);
-	expect_d_eq(0, err, "Unexpected mallctlnametomib() failure");
-
-	sz = sizeof(ndirty_huge);
-	mib[2] = arena_ind;
-	err = mallctlbymib(mib, miblen, &ndirty_huge, &sz, NULL, 0);
-	expect_d_eq(0, err, "Unexpected mallctlbymib() failure");
-
-	return ndirty_huge + ndirty_nonhuge;
+	psset_stats_t *stats = &test_shard(arena_ind)->psset.stats;
+	return stats->empty_slabs[0].ndirty + stats->empty_slabs[1].ndirty;
 }
 
 static void
