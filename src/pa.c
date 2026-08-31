@@ -50,7 +50,6 @@ pa_shard_init(tsdn_t *tsdn, pa_shard_t *shard, pa_central_t *central,
 
 	shard->ind = ind;
 
-	shard->ever_used_hpa = false;
 	atomic_store_b(&shard->use_hpa, false, ATOMIC_RELAXED);
 
 	atomic_store_zu(&shard->nactive, 0, ATOMIC_RELAXED);
@@ -66,26 +65,23 @@ pa_shard_init(tsdn_t *tsdn, pa_shard_t *shard, pa_central_t *central,
 	return false;
 }
 
-bool
-pa_shard_enable_hpa(tsdn_t *tsdn, pa_shard_t *shard,
-    const hpa_shard_opts_t *hpa_opts, const sec_opts_t *hpa_sec_opts) {
-	if (hpa_shard_init(tsdn, &shard->hpa, &shard->central->hpa,
-	        shard->emap, shard->base, &shard->edata_cache, shard->ind,
-	        hpa_opts, hpa_sec_opts)) {
-		return true;
-	}
-	shard->ever_used_hpa = true;
-	atomic_store_b(&shard->use_hpa, true, ATOMIC_RELAXED);
-
-	return false;
+void
+pa_shard_set_use_hpa(pa_shard_t *shard, bool use_hpa) {
+	atomic_store_b(&shard->use_hpa, use_hpa, ATOMIC_RELAXED);
 }
 
 void
 pa_shard_disable_hpa(tsdn_t *tsdn, pa_shard_t *shard) {
-	atomic_store_b(&shard->use_hpa, false, ATOMIC_RELAXED);
-	if (shard->ever_used_hpa) {
-		hpa_shard_disable(tsdn, &shard->hpa);
-	}
+	/*
+	 * Flag only.  This used to flush and disable the arena's own HPA
+	 * shard, which was fine when it had one to itself; the shards are
+	 * shared now, so doing that here would discard extents cached on
+	 * behalf of every other arena.  Stopping this arena from routing new
+	 * allocations to the HPA is the whole of what the caller wants, and
+	 * extents it already owns keep going home to their own shard.
+	 */
+	(void)tsdn;
+	pa_shard_set_use_hpa(shard, false);
 }
 
 void
@@ -97,9 +93,6 @@ pa_shard_reset(tsdn_t *tsdn, pa_shard_t *shard) {
 void
 pa_shard_flush(tsdn_t *tsdn, pa_shard_t *shard, bool all) {
 	pac_sec_flush(tsdn, &shard->pac);
-	if (shard->ever_used_hpa) {
-		hpa_shard_flush(tsdn, &shard->hpa);
-	}
 	if (all) {
 		pac_decay_all_now(tsdn, &shard->pac, extent_state_dirty);
 		if (pac_should_decay_muzzy(&shard->pac)) {
@@ -115,10 +108,13 @@ pa_shard_uses_hpa(pa_shard_t *shard) {
 
 void
 pa_shard_destroy(tsdn_t *tsdn, pa_shard_t *shard) {
+	/*
+	 * PAC only.  The HPA shards outlive any single arena -- an extent this
+	 * arena allocated may still be cached in a shared SEC, and the shard
+	 * serves other arenas regardless -- so there is nothing here to
+	 * destroy on the HPA side.
+	 */
 	pac_destroy(tsdn, &shard->pac);
-	if (shard->ever_used_hpa) {
-		hpa_shard_destroy(tsdn, &shard->hpa);
-	}
 }
 
 edata_t *
@@ -129,10 +125,32 @@ pa_alloc(tsdn_t *tsdn, pa_shard_t *shard, size_t size, size_t alignment,
 	    tsdn_witness_tsdp_get(tsdn), WITNESS_RANK_CORE, 0);
 	assert(!guarded || alignment <= PAGE);
 
-	edata_t *edata = NULL;
-	if (!guarded && pa_shard_uses_hpa(shard)) {
-		edata = hpa_alloc(tsdn, &shard->hpa, size, alignment,
-		    zero, /* guarded */ false, slab, deferred_work_generated);
+	edata_t     *edata = NULL;
+	hpa_shard_t *hpa = NULL;
+	/*
+	 * size <= HUGEPAGE is a precondition of routing, not a policy: a
+	 * larger extent has no page-size class in the routing table and could
+	 * never be served by a pageslab anyway.  hpa_alloc() used to absorb
+	 * these and return NULL, but the decision now happens one step
+	 * earlier, so the check has to move with it.  Whether a size that
+	 * *can* be routed should be served is still hpa_alloc()'s call
+	 * (slab_max_alloc, frequent_reuse).
+	 */
+	if (!guarded && size <= HUGEPAGE && pa_shard_uses_hpa(shard)) {
+		/*
+		 * Step 1 picks the pool from the requested size class; step 2
+		 * lets that pool pick one of its own shards.  The arena index
+		 * is only a hint -- with the identity layout and an arena below
+		 * the boot-time shard count it selects shard == arena, which is
+		 * the old topology.
+		 */
+		hpa = hpa_route(tsdn, &hpa_pools_global, size, slab, szind,
+		    /* hint */ shard->ind);
+		if (hpa != NULL) {
+			edata = hpa_alloc(tsdn, hpa, size, alignment, zero,
+			    /* guarded */ false, slab,
+			    deferred_work_generated);
+		}
 	}
 	/*
 	 * Fall back to the PAC if the HPA is off or couldn't serve the given
@@ -144,14 +162,42 @@ pa_alloc(tsdn_t *tsdn, pa_shard_t *shard, size_t size, size_t alignment,
 	}
 	if (edata != NULL) {
 		assert(edata_size_get(edata) == size);
-		/* HPA extents acquire the requesting arena before publication. */
+		/*
+		 * This is the single point at which an extent acquires an
+		 * owning arena, and it has to happen before anything reads one.
+		 *
+		 * HPA extents arrive unowned: either freshly carved, or served
+		 * from the SEC, where they may have been parked by a different
+		 * arena entirely.  PAC extents come from this arena's own
+		 * caches and already carry the right index.
+		 */
 		if (edata_pai_get(edata) == EXTENT_PAI_HPA) {
+			/*
+			 * Whether it was carved just now or served from the
+			 * SEC, it must have arrived unowned -- an HPA extent
+			 * carrying an arena at this point means someone failed
+			 * to relinquish it on the way in, and we would be
+			 * silently overwriting the evidence.
+			 */
 			assert(edata_arena_ind_get_maybe_unassociated(edata)
 			    == EDATA_ARENA_IND_UNASSOCIATED);
 			edata_arena_ind_set(edata, shard->ind);
-			/* Each arena has one HPA shard in this topology. */
-			assert(hpdata_shard_get(edata_ps_get(edata))
-			    == shard->ind);
+			/*
+			 * The extent came from the shard we routed to.  True
+			 * for SEC hits as well as fresh carvings: an extent
+			 * only ever enters the SEC of its own owner, because
+			 * hpa_dalloc() reaches the SEC through
+			 * hpa_shard_from_edata().
+			 *
+			 * Note this is emphatically *not* the arena index.
+			 * Even under the identity layout the two diverge as
+			 * soon as an arena exists beyond the boot-time shard
+			 * count -- arenas.create() does that -- and later
+			 * arenas then share shards with earlier ones.  Shards
+			 * are a resource sized once at boot, not a per-arena
+			 * possession.
+			 */
+			assert(hpa_shard_from_edata(edata) == hpa);
 		}
 		assert(edata_arena_ind_get(edata) == shard->ind);
 		pa_nactive_add(shard, size >> LG_PAGE);
@@ -240,9 +286,15 @@ pa_dalloc(tsdn_t *tsdn, pa_shard_t *shard, edata_t *edata,
 	edata_szind_set(edata, SC_NSIZES);
 	pa_nactive_sub(shard, edata_size_get(edata) >> LG_PAGE);
 	if (edata_pai_get(edata) == EXTENT_PAI_HPA) {
-		/* An extent cached by the HPA or SEC has no arena owner. */
+		/*
+		 * Relinquish the arena as the extent leaves it.  An HPA extent
+		 * can be cached in the SEC and reissued to a different arena,
+		 * so anything read from here on is stale by construction; make
+		 * that a loud failure rather than a plausible wrong answer.
+		 */
 		edata_arena_ind_set(edata, EDATA_ARENA_IND_UNASSOCIATED);
-		hpa_dalloc(tsdn, &shard->hpa, edata, deferred_work_generated);
+		hpa_dalloc(tsdn, hpa_shard_from_edata(edata), edata,
+		    deferred_work_generated);
 	} else {
 		pac_dalloc(tsdn, &shard->pac, edata, deferred_work_generated);
 	}
@@ -259,14 +311,6 @@ pa_decay_ms_get(pa_shard_t *shard, extent_state_t state) {
 	return pac_decay_ms_get(&shard->pac, state);
 }
 
-void
-pa_shard_set_deferral_allowed(
-    tsdn_t *tsdn, pa_shard_t *shard, bool deferral_allowed) {
-	if (pa_shard_uses_hpa(shard)) {
-		hpa_shard_set_deferral_allowed(
-		    tsdn, &shard->hpa, deferral_allowed);
-	}
-}
 
 void
 pa_shard_handle_deferred_work(tsdn_t *tsdn, pa_shard_t *shard) {
@@ -284,15 +328,13 @@ pa_shard_handle_deferred_work(tsdn_t *tsdn, pa_shard_t *shard) {
 void
 pa_shard_do_deferred_work(
     tsdn_t *tsdn, pa_shard_t *shard, bool is_background_thread) {
-	pac_do_deferred_work(tsdn, &shard->pac, is_background_thread);
 	/*
-	 * Application threads self-throttle HPA deferred work inline from their
-	 * own alloc/dalloc path (hpa_shard_maybe_do_deferred_work, capped), so
-	 * only drive it (forced, uncapped) from here on the background thread.
+	 * PAC only.  HPA deferred work is no longer per arena: shards are
+	 * shared, so driving them from the arena walk would drive each one
+	 * once per arena.  The background thread drives them in its own pass
+	 * over the pool set -- see hpa_pools_do_deferred_work().
 	 */
-	if (is_background_thread && pa_shard_uses_hpa(shard)) {
-		hpa_shard_do_deferred_work(tsdn, &shard->hpa);
-	}
+	pac_do_deferred_work(tsdn, &shard->pac, is_background_thread);
 }
 
 /*
@@ -302,17 +344,6 @@ pa_shard_do_deferred_work(
  */
 uint64_t
 pa_shard_time_until_deferred_work(tsdn_t *tsdn, pa_shard_t *shard) {
-	uint64_t time = pac_time_until_deferred_work(tsdn, &shard->pac);
-	if (time == DEFERRED_WORK_MIN) {
-		return time;
-	}
-
-	if (pa_shard_uses_hpa(shard)) {
-		uint64_t hpa = hpa_time_until_deferred_work(
-		    tsdn, &shard->hpa);
-		if (hpa < time) {
-			time = hpa;
-		}
-	}
-	return time;
+	/* PAC only; the HPA half is folded in by the caller's pool pass. */
+	return pac_time_until_deferred_work(tsdn, &shard->pac);
 }

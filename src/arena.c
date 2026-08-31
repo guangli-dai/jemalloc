@@ -45,6 +45,28 @@ static atomic_zd_t muzzy_decay_ms_default;
 emap_t              arena_emap_global;
 static pa_central_t arena_pa_central_global;
 
+/*
+ * The edata cache every HPA shard draws from, backed by b0.
+ *
+ * It has to be shared, and it has to outlive any arena.  Shards used to take
+ * edata_t from the arena that owned them, which was safe only because an HPA
+ * extent never left its arena.  Now one can be created by one arena, parked in
+ * a shared SEC, and handed to another -- so metadata carved from an arena's
+ * base could still be live after arena_destroy() deleted that base.  b0 is
+ * never destroyed, and is already the base hpa_central uses.
+ */
+static edata_cache_t arena_hpa_edata_cache_global;
+
+pa_central_t *
+arena_pa_central_get(void) {
+	return &arena_pa_central_global;
+}
+
+edata_cache_t *
+arena_hpa_edata_cache_get(void) {
+	return &arena_hpa_edata_cache_global;
+}
+
 div_info_t arena_binind_div_info[SC_NBINS];
 
 JET_EXTERN void
@@ -100,8 +122,8 @@ void
 arena_stats_merge(tsdn_t *tsdn, arena_t *arena, unsigned *nthreads,
     const char **dss, ssize_t *dirty_decay_ms, ssize_t *muzzy_decay_ms,
     size_t *nactive, size_t *ndirty, size_t *nmuzzy, arena_stats_t *astats,
-    bin_stats_data_t *bstats, arena_stats_large_t *lstats, pac_estats_t *estats,
-    hpa_shard_stats_t *hpastats) {
+    bin_stats_data_t *bstats, arena_stats_large_t *lstats,
+    pac_estats_t *estats) {
 	cassert(config_stats);
 
 	arena_basic_stats_merge(tsdn, arena, nthreads, dss, dirty_decay_ms,
@@ -171,7 +193,7 @@ arena_stats_merge(tsdn_t *tsdn, arena_t *arena, unsigned *nthreads,
 	}
 
 	pa_shard_stats_merge(tsdn, &arena->pa_shard, &astats->pa_shard_stats,
-	    estats, hpastats, &astats->resident);
+	    estats, &astats->resident);
 
 	LOCKEDINT_MTX_UNLOCK(tsdn, arena->stats.mtx);
 
@@ -1564,14 +1586,26 @@ arena_new(tsdn_t *tsdn, unsigned ind, const arena_config_t *config) {
 	 * - Arena 0 initialization.  In this case, we're mid-bootstrapping,
 	 *   and so background_thread_enabled is not yet initialized.
 	 */
-	if (opt_hpa && ehooks_are_default(base_ehooks_get(base)) && ind != 0) {
-		hpa_shard_opts_t hpa_shard_opts = opt_hpa_opts;
-		hpa_shard_opts.deferral_allowed = background_thread_enabled();
-		if (pa_shard_enable_hpa(tsdn, &arena->pa_shard, &hpa_shard_opts,
-		        &opt_hpa_sec_opts)) {
-			goto label_error;
-		}
-	}
+	/*
+	 * Route to the HPA unless custom extent hooks are installed, in which
+	 * case we must only hand back memory that came from them.
+	 *
+	 * This is now just a flag.  The shards live in the global pool set,
+	 * built once at boot, so there is nothing per-arena to construct here
+	 * and no dependency on how far bootstrapping has got -- which is why
+	 * arena 0 no longer needs the special case it used to.
+	 */
+	/*
+	 * Also gated on the pools existing.  Arena 0 (and the oversize arena)
+	 * are created during bootstrap, before hpa_pools_boot() has run, so
+	 * routing them to the HPA here would reach a pool set that is not
+	 * built yet.  malloc_init_hard() turns them on once the pools are up;
+	 * every arena created after that sees hpa_pools_ready() and enables
+	 * itself.
+	 */
+	pa_shard_set_use_hpa(&arena->pa_shard,
+	    opt_hpa && hpa_pools_ready()
+	        && ehooks_are_default(base_ehooks_get(base)));
 
 	/* We don't support reentrancy for arena 0 bootstrapping. */
 	if (ind != 0) {
@@ -1708,6 +1742,9 @@ arena_boot(sc_data_t *sc_data, base_t *base, bool hpa) {
 		arena_bin_offsets[i] = cur_offset;
 		nbins_total += bin_infos[i].n_shards;
 		cur_offset += (uint32_t)(bin_infos[i].n_shards * sizeof(bin_t));
+	}
+	if (hpa && edata_cache_init(&arena_hpa_edata_cache_global, base)) {
+		return true;
 	}
 	return pa_central_init(
 	    &arena_pa_central_global, base, hpa, &hpa_hooks_default);

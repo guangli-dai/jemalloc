@@ -50,7 +50,13 @@ typedef struct ctl_arena_stats_s {
 	bin_stats_data_t    bstats[SC_NBINS];
 	arena_stats_large_t lstats[SC_NSIZES - SC_NBINS];
 	pac_estats_t        estats[SC_NPSIZES];
-	hpa_shard_stats_t   hpastats;
+	/*
+	 * No hpa_shard_stats_t here.  HPA shards left arenas for process-wide
+	 * pools, so there is nothing per-arena to hold; the figures live in
+	 * ctl_stats_t.hpastats.  The field lingered here unpopulated for a
+	 * while, which was a trap -- it looked like the source for the
+	 * stats.arenas.<i>.hpa_shard compatibility nodes, and it is not.
+	 */
 } ctl_arena_stats_t;
 
 typedef struct ctl_stats_s {
@@ -67,6 +73,14 @@ typedef struct ctl_stats_s {
 
 	background_thread_stats_t background_thread;
 	mutex_prof_data_t mutex_prof_data[mutex_prof_num_global_mutexes];
+
+	/*
+	 * HPA figures are process-wide, not per arena: a shard serves every
+	 * arena that routes to its pool, so there is no per-arena share to
+	 * attribute.  Reported under stats.hpa rather than
+	 * stats.arenas.<i>.hpa_shard, which no longer means anything.
+	 */
+	hpa_shard_stats_t hpastats;
 } ctl_stats_t;
 
 typedef struct ctl_arena_s ctl_arena_t;

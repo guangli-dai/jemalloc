@@ -1,9 +1,12 @@
 #include "jemalloc/internal/jemalloc_preamble.h"
 
+#include "jemalloc/internal/deferral.h"
 #include "jemalloc/internal/hpa_pool.h"
 #include "jemalloc/internal/malloc_io.h"
 
 const char *const hpa_pool_pick_type_names[] = {"arena", "roundrobin"};
+
+hpa_pool_set_t hpa_pools_global;
 
 bool
 hpa_pool_configs_identity(hpa_pool_configs_t *configs, unsigned narenas) {
@@ -254,23 +257,173 @@ hpa_pool_pick_shard(tsdn_t *tsdn, hpa_pool_t *pool, unsigned hint) {
 	return shard;
 }
 
-void
-hpa_pools_prefork(tsdn_t *tsdn, hpa_pool_set_t *set) {
-	for (unsigned i = 0; i < set->npools; i++) {
-		malloc_mutex_prefork(tsdn, &set->pools[i].init_mtx);
+typedef void (*hpa_pool_shard_cb_t)(tsdn_t *, hpa_shard_t *);
+
+static void
+hpa_pools_for_each_shard(tsdn_t *tsdn, hpa_pool_shard_cb_t cb) {
+	for (unsigned i = 0; i < hpa_pools_global.npools; i++) {
+		hpa_pool_t *pool = &hpa_pools_global.pools[i];
+		for (unsigned j = 0; j < pool->nshards; j++) {
+			hpa_shard_t *shard = atomic_load_p(&pool->shards[j],
+			    ATOMIC_ACQUIRE);
+			if (shard != NULL) {
+				cb(tsdn, shard);
+			}
+		}
 	}
 }
 
 void
-hpa_pools_postfork_parent(tsdn_t *tsdn, hpa_pool_set_t *set) {
-	for (unsigned i = set->npools; i-- > 0;) {
-		malloc_mutex_postfork_parent(tsdn, &set->pools[i].init_mtx);
+hpa_pools_prefork2(tsdn_t *tsdn) {
+	if (!hpa_pools_ready()) {
+		return;
+	}
+	/* Freeze the set of initialized slots before locking their shards. */
+	for (unsigned i = 0; i < hpa_pools_global.npools; i++) {
+		malloc_mutex_prefork(tsdn,
+		    &hpa_pools_global.pools[i].init_mtx);
+	}
+	hpa_pools_for_each_shard(tsdn, hpa_shard_prefork2);
+}
+
+void
+hpa_pools_prefork3(tsdn_t *tsdn) {
+	if (hpa_pools_ready()) {
+		hpa_pools_for_each_shard(tsdn, hpa_shard_prefork3);
 	}
 }
 
 void
-hpa_pools_postfork_child(tsdn_t *tsdn, hpa_pool_set_t *set) {
-	for (unsigned i = set->npools; i-- > 0;) {
-		malloc_mutex_postfork_child(tsdn, &set->pools[i].init_mtx);
+hpa_pools_prefork4(tsdn_t *tsdn) {
+	if (hpa_pools_ready()) {
+		hpa_pools_for_each_shard(tsdn, hpa_shard_prefork4);
 	}
+}
+
+void
+hpa_pools_prefork5(tsdn_t *tsdn) {
+	if (hpa_pools_ready()) {
+		edata_cache_prefork(tsdn, hpa_pools_global.edata_cache);
+	}
+}
+
+void
+hpa_pools_postfork_parent(tsdn_t *tsdn) {
+	if (!hpa_pools_ready()) {
+		return;
+	}
+	edata_cache_postfork_parent(tsdn, hpa_pools_global.edata_cache);
+	hpa_pools_for_each_shard(tsdn, hpa_shard_postfork_parent);
+	for (unsigned i = hpa_pools_global.npools; i-- > 0;) {
+		malloc_mutex_postfork_parent(tsdn,
+		    &hpa_pools_global.pools[i].init_mtx);
+	}
+}
+
+void
+hpa_pools_postfork_child(tsdn_t *tsdn) {
+	if (!hpa_pools_ready()) {
+		return;
+	}
+	edata_cache_postfork_child(tsdn, hpa_pools_global.edata_cache);
+	hpa_pools_for_each_shard(tsdn, hpa_shard_postfork_child);
+	for (unsigned i = hpa_pools_global.npools; i-- > 0;) {
+		malloc_mutex_postfork_child(tsdn,
+		    &hpa_pools_global.pools[i].init_mtx);
+	}
+}
+
+static bool hpa_pools_deferral_allowed;
+
+static void
+hpa_pool_enable_deferral(tsdn_t *tsdn, hpa_shard_t *shard) {
+	hpa_shard_set_deferral_allowed(tsdn, shard, hpa_pools_deferral_allowed);
+}
+
+void
+hpa_pools_set_deferral_allowed(tsdn_t *tsdn, bool allowed) {
+	hpa_pools_deferral_allowed = allowed;
+	hpa_pools_global.opts.deferral_allowed = allowed;
+	if (hpa_pools_ready()) {
+		hpa_pools_for_each_shard(tsdn, hpa_pool_enable_deferral);
+	}
+}
+
+void
+hpa_pools_do_deferred_work(tsdn_t *tsdn) {
+	if (hpa_pools_ready()) {
+		hpa_pools_for_each_shard(tsdn, hpa_shard_do_deferred_work);
+	}
+}
+
+uint64_t
+hpa_pools_time_until_deferred_work(tsdn_t *tsdn) {
+	uint64_t time = DEFERRED_WORK_MAX;
+	if (!hpa_pools_ready()) {
+		return time;
+	}
+	for (unsigned i = 0; i < hpa_pools_global.npools; i++) {
+		hpa_pool_t *pool = &hpa_pools_global.pools[i];
+		for (unsigned j = 0; j < pool->nshards; j++) {
+			hpa_shard_t *shard = atomic_load_p(&pool->shards[j],
+			    ATOMIC_ACQUIRE);
+			if (shard != NULL) {
+				uint64_t candidate = hpa_time_until_deferred_work(
+				    tsdn, shard);
+				if (candidate < time) {
+					time = candidate;
+				}
+			}
+		}
+	}
+	return time;
+}
+
+void
+hpa_pools_stats_merge(tsdn_t *tsdn, hpa_shard_stats_t *dst) {
+	if (!hpa_pools_ready()) {
+		return;
+	}
+	for (unsigned i = 0; i < hpa_pools_global.npools; i++) {
+		hpa_pool_t *pool = &hpa_pools_global.pools[i];
+		for (unsigned j = 0; j < pool->nshards; j++) {
+			hpa_shard_t *shard = atomic_load_p(&pool->shards[j],
+			    ATOMIC_ACQUIRE);
+			if (shard != NULL) {
+				hpa_shard_stats_merge(tsdn, shard, dst);
+			}
+		}
+	}
+}
+
+size_t
+hpa_pools_ndirty(void) {
+	size_t ndirty = 0;
+	if (!hpa_pools_ready()) {
+		return ndirty;
+	}
+	for (unsigned i = 0; i < hpa_pools_global.npools; i++) {
+		hpa_pool_t *pool = &hpa_pools_global.pools[i];
+		for (unsigned j = 0; j < pool->nshards; j++) {
+			hpa_shard_t *shard = atomic_load_p(&pool->shards[j],
+			    ATOMIC_ACQUIRE);
+			if (shard != NULL) {
+				ndirty += psset_ndirty(&shard->psset);
+			}
+		}
+	}
+	return ndirty;
+}
+
+void
+hpa_pools_flush(tsdn_t *tsdn) {
+	if (hpa_pools_ready()) {
+		hpa_pools_for_each_shard(tsdn, hpa_shard_flush);
+	}
+}
+
+void
+hpa_pools_purge(tsdn_t *tsdn) {
+	hpa_pools_flush(tsdn);
+	hpa_pools_do_deferred_work(tsdn);
 }

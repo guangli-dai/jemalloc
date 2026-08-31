@@ -3018,6 +3018,114 @@ struct extent_hooks_s {
         mutexes, arena mutexes and bin mutexes.</para></listitem>
       </varlistentry>
 
+      <varlistentry id="stats.arenas.i.hpa_shard">
+        <term>
+          <mallctl>stats.arenas.&lt;i&gt;.hpa_shard.{counter}</mallctl>
+          <mallctl>stats.arenas.&lt;i&gt;.hpa_sec_{counter}</mallctl>
+          <literal>r-</literal>
+          [<option>--enable-stats</option>]
+        </term>
+        <listitem><para>Retained for compatibility, and only for
+        <parameter>i</parameter> equal to
+        <constant>MALLCTL_ARENAS_ALL</constant> (or its deprecated
+        <mallctl>arena.&lt;narenas&gt;</mallctl> spelling).  Before HPA shards
+        were moved into process-wide pools each arena owned a shard and these
+        paths reported it; they now report the same process-wide figures as the
+        corresponding <mallctl>stats.hpa.*</mallctl> nodes.  Since the merged
+        pseudo-arena always meant the process-wide total, its value is unchanged
+        in meaning.</para>
+
+        <para>For any concrete arena, and for
+        <constant>MALLCTL_ARENAS_DESTROYED</constant>, these return
+        <errorname>ENOENT</errorname>.  One HPA now serves every arena, so there
+        is no per-arena figure to report, and returning the process-wide totals
+        instead would give an arena-shaped number that is not about that arena.
+        A per-band breakdown arrives with the pool layout options.</para></listitem>
+      </varlistentry>
+
+      <varlistentry id="stats.hpa.pool.i.npageslabs_huge">
+        <term>
+          <mallctl>stats.hpa.pool.&lt;i&gt;.npageslabs_huge</mallctl>
+          (<type>size_t</type>)
+          <literal>r-</literal>
+          [<option>--enable-stats</option>]
+        </term>
+        <listitem><para>Number of hugepage-sized slabs held by pool &lt;i&gt;
+        that are backed by a hugepage.  The corresponding
+        <mallctl>npageslabs_nonhuge</mallctl> counts the rest.</para>
+
+        <para>Occupancy, which is the figure a band's size boundaries and
+        hugification threshold are tuned against, is
+        <mallctl>nactive_huge</mallctl> plus
+        <mallctl>nactive_nonhuge</mallctl> divided by the total slab count
+        times the number of pages in a hugepage.</para></listitem>
+      </varlistentry>
+
+      <varlistentry id="stats.hpa.pool.i.nactive_huge">
+        <term>
+          <mallctl>stats.hpa.pool.&lt;i&gt;.nactive_huge</mallctl>
+          (<type>size_t</type>)
+          <literal>r-</literal>
+          [<option>--enable-stats</option>]
+        </term>
+        <listitem><para>Pages in pool &lt;i&gt; that are in use and sit on a
+        hugepage-backed slab.  <mallctl>nactive_nonhuge</mallctl> counts the
+        rest.</para></listitem>
+      </varlistentry>
+
+      <varlistentry id="stats.hpa.pool.i.ndirty_huge">
+        <term>
+          <mallctl>stats.hpa.pool.&lt;i&gt;.ndirty_huge</mallctl>
+          (<type>size_t</type>)
+          <literal>r-</literal>
+          [<option>--enable-stats</option>]
+        </term>
+        <listitem><para>Pages in pool &lt;i&gt; that have been touched but are
+        no longer in use, on hugepage-backed slabs.
+        <mallctl>ndirty_nonhuge</mallctl> counts the rest.</para></listitem>
+      </varlistentry>
+
+      <varlistentry id="stats.hpa.pool.i.nhugifies">
+        <term>
+          <mallctl>stats.hpa.pool.&lt;i&gt;.nhugifies</mallctl>
+          (<type>uint64_t</type>)
+          <literal>r-</literal>
+          [<option>--enable-stats</option>]
+        </term>
+        <listitem><para>Slabs in pool &lt;i&gt; that have been backed by a
+        hugepage.  <mallctl>ndehugifies</mallctl> counts those that stopped
+        being, and <mallctl>nhugify_failures</mallctl> those the kernel
+        declined; <mallctl>npurges</mallctl> and
+        <mallctl>npurge_passes</mallctl> report purging over the same
+        band.</para>
+
+        <para>A band whose hugify and dehugify counts advance together is
+        thrashing rather than settling, which is the failure mode of a
+        hugification threshold set too low for the traffic the band
+        sees.</para></listitem>
+      </varlistentry>
+
+      <varlistentry id="stats.hpa.pool.i.mutexes.hpa_shard">
+        <term>
+          <mallctl>stats.hpa.pool.&lt;i&gt;.mutexes.hpa_shard.{counter}</mallctl>
+	  (<type>counter specific type</type>) <literal>r-</literal>
+          [<option>--enable-stats</option>]
+        </term>
+        <listitem><para>Contention on pool &lt;i&gt;'s shard mutexes, summed
+        over that pool's shards only; <mallctl>hpa_shard_grow</mallctl> and
+        <mallctl>hpa_sec</mallctl> are the same for the other two locks.  The
+        counters are those in <link linkend="mutex_counters">mutex profiling
+        counters</link>, and are named to match the process-wide sums at <link
+        linkend="stats.mutexes.hpa_shard"><mallctl>stats.mutexes.hpa_shard</mallctl></link>.
+        </para>
+
+        <para>Reported per pool because the tradeoff a band's boundaries make
+        is packing against contention: routing more traffic to fewer, larger
+        slabs is what lets extents share a hugepage, and is also what makes
+        them contend.  The process-wide sums cannot separate a busy band from a
+        quiet one.</para></listitem>
+      </varlistentry>
+
       <varlistentry id="stats.arenas.i.dss">
         <term>
           <mallctl>stats.arenas.&lt;i&gt;.dss</mallctl>

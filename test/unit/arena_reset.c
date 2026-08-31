@@ -57,9 +57,19 @@ get_large_size(size_t ind) {
 	return get_size_impl("arenas.lextent.0.size", ind);
 }
 
-/* Like ivsalloc(), but safe to call on discarded allocations. */
+/*
+ * Like ivsalloc(), but safe to call on discarded allocations, and scoped to
+ * one arena.
+ *
+ * The scoping matters now that HPA shards belong to no arena.  An extent this
+ * arena freed goes back to a shared shard and is immediately available to
+ * every other arena, so the address can be part of somebody else's live
+ * allocation by the time we look.  "Is this address mapped at all" therefore
+ * no longer answers the question the test is asking, which is whether *this
+ * arena* still owns it.
+ */
 static size_t
-vsalloc(tsdn_t *tsdn, const void *ptr) {
+vsalloc(tsdn_t *tsdn, const void *ptr, unsigned arena_ind) {
 	emap_full_alloc_ctx_t full_alloc_ctx;
 	bool                  missing = emap_full_alloc_ctx_try_lookup(
             tsdn, &arena_emap_global, ptr, &full_alloc_ctx);
@@ -75,6 +85,16 @@ vsalloc(tsdn_t *tsdn, const void *ptr) {
 	}
 
 	if (full_alloc_ctx.szind == SC_NSIZES) {
+		return 0;
+	}
+
+	/*
+	 * Live, but reissued to some other arena -- not ours any more.  Note
+	 * this has to be checked before edata_usize_get(), which reads szind
+	 * off the extent and asserts it is valid.
+	 */
+	if (edata_arena_ind_get_maybe_unassociated(full_alloc_ctx.edata)
+	    != arena_ind) {
 		return 0;
 	}
 
@@ -144,8 +164,8 @@ do_arena_reset_post(void **ptrs, unsigned nptrs, unsigned arena_ind) {
 	}
 	/* Verify allocations no longer exist. */
 	for (i = 0; i < nptrs; i++) {
-		expect_zu_eq(vsalloc(tsdn, ptrs[i]), 0,
-		    "Allocation should no longer exist");
+		expect_zu_eq(vsalloc(tsdn, ptrs[i], arena_ind), 0,
+		    "Allocation should no longer belong to this arena");
 	}
 	if (have_background_thread) {
 		malloc_mutex_unlock(

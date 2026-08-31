@@ -100,6 +100,22 @@ struct hpa_pool_set_s {
 	sec_opts_t sec_opts;
 };
 
+extern hpa_pool_set_t hpa_pools_global;
+
+static inline bool
+hpa_pools_ready(void) {
+	return hpa_pools_global.initialized;
+}
+
+static inline unsigned
+hpa_pools_nshards(const hpa_pool_set_t *set) {
+	unsigned total = 0;
+	for (unsigned i = 0; i < set->npools; i++) {
+		total += set->pools[i].nshards;
+	}
+	return total;
+}
+
 /* Stable pageslab owner id for a pool-local shard slot. */
 static inline unsigned
 hpa_pool_shard_id(const hpa_pool_t *pool, unsigned shard_ind) {
@@ -120,6 +136,15 @@ hpa_pool_shard_from_id(hpa_pool_set_t *set, unsigned id) {
 	hpa_shard_t *shard = (hpa_shard_t *)atomic_load_p(
 	    &set->pools[pool_ind].shards[shard_ind], ATOMIC_ACQUIRE);
 	return shard;
+}
+
+JEMALLOC_ALWAYS_INLINE hpa_shard_t *
+hpa_shard_from_edata(const edata_t *edata) {
+	assert(edata_pai_get(edata) == EXTENT_PAI_HPA);
+	hpdata_t *ps = edata_ps_get(edata);
+	assert(ps != NULL);
+	return hpa_pool_shard_from_id(&hpa_pools_global,
+	    hpdata_shard_get(ps));
 }
 
 /*
@@ -158,9 +183,20 @@ hpa_pool_t *hpa_pool_lookup(hpa_pool_set_t *set, unsigned key);
 hpa_shard_t *hpa_pool_pick_shard(
     tsdn_t *tsdn, hpa_pool_t *pool, unsigned hint);
 
-void hpa_pools_prefork(tsdn_t *tsdn, hpa_pool_set_t *set);
-void hpa_pools_postfork_parent(tsdn_t *tsdn, hpa_pool_set_t *set);
-void hpa_pools_postfork_child(tsdn_t *tsdn, hpa_pool_set_t *set);
+void hpa_pools_prefork2(tsdn_t *tsdn);
+void hpa_pools_prefork3(tsdn_t *tsdn);
+void hpa_pools_prefork4(tsdn_t *tsdn);
+void hpa_pools_prefork5(tsdn_t *tsdn);
+void hpa_pools_postfork_parent(tsdn_t *tsdn);
+void hpa_pools_postfork_child(tsdn_t *tsdn);
+
+void hpa_pools_set_deferral_allowed(tsdn_t *tsdn, bool allowed);
+void hpa_pools_do_deferred_work(tsdn_t *tsdn);
+uint64_t hpa_pools_time_until_deferred_work(tsdn_t *tsdn);
+void hpa_pools_stats_merge(tsdn_t *tsdn, hpa_shard_stats_t *dst);
+size_t hpa_pools_ndirty(void);
+void hpa_pools_flush(tsdn_t *tsdn);
+void hpa_pools_purge(tsdn_t *tsdn);
 
 /* The two composed: the whole of the allocation-side routing decision. */
 JEMALLOC_ALWAYS_INLINE hpa_shard_t *
