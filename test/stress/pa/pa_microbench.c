@@ -263,7 +263,8 @@ initialize_pa_infrastructure(int num_shards) {
 	}
 
 	hpa_pool_configs_t configs;
-	if (hpa_pool_configs_identity(&configs, (unsigned)num_shards)) {
+	if (hpa_pool_configs_identity(&configs, (unsigned)num_shards,
+	        HPA_MAX_SHARDS_PER_POOL)) {
 		fprintf(stderr, "Too many HPA shards for the identity pool\n");
 		cleanup_pa_infrastructure(num_shards);
 		return true;

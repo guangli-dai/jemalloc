@@ -9,19 +9,43 @@ const char *const hpa_pool_pick_type_names[] = {"arena", "roundrobin"};
 hpa_pool_set_t hpa_pools_global;
 
 bool
-hpa_pool_configs_identity(hpa_pool_configs_t *configs, unsigned narenas) {
+hpa_pool_configs_identity(hpa_pool_configs_t *configs, unsigned narenas,
+    unsigned nshards_max) {
 	assert(narenas > 0);
-	memset(configs, 0, sizeof(*configs));
-	if (narenas > HPA_MAX_SHARDS_PER_POOL) {
-		malloc_printf("<jemalloc>: hpa pools: %u arenas do not fit in "
-		    "the identity pool's %u shard slots\n", narenas,
-		    (unsigned)HPA_MAX_SHARDS_PER_POOL);
+	hpa_pool_configs_init(configs);
+	if (nshards_max == 0 || nshards_max > HPA_MAX_SHARDS_PER_POOL) {
 		return true;
 	}
+	configs->nshards_max = nshards_max;
 	configs->npools = 1;
 	configs->pools[0].size_max = HUGEPAGE;
-	configs->pools[0].nshards = narenas;
+	configs->pools[0].nshards = narenas < nshards_max
+	    ? narenas : nshards_max;
 	configs->pick = hpa_pool_pick_arena;
+	return false;
+}
+
+void
+hpa_pool_configs_init(hpa_pool_configs_t *configs) {
+	memset(configs, 0, sizeof(*configs));
+	configs->pick = hpa_pool_pick_arena;
+	configs->nshards_max = HPA_POOL_NSHARDS_MAX_DEFAULT;
+}
+
+bool
+hpa_pool_configs_add(hpa_pool_configs_t *configs, size_t size_start,
+    size_t size_end, unsigned nshards) {
+	if (configs->npools == HPA_MAX_POOLS) {
+		return true;
+	}
+	size_t expected = configs->npools == 0 ? 1
+	    : configs->pools[configs->npools - 1].size_max + 1;
+	if (size_start != expected || size_end < size_start) {
+		return true;
+	}
+	configs->pools[configs->npools].size_max = size_end;
+	configs->pools[configs->npools].nshards = nshards;
+	configs->npools++;
 	return false;
 }
 
@@ -37,6 +61,13 @@ hpa_pool_configs_validate(const hpa_pool_configs_t *configs) {
 	if (configs->npools == 0 || configs->npools > HPA_MAX_POOLS) {
 		malloc_printf("<jemalloc>: hpa pools: npools %u out of range "
 		    "(1..%u)\n", configs->npools, (unsigned)HPA_MAX_POOLS);
+		return true;
+	}
+	if (configs->nshards_max < configs->npools
+	    || configs->nshards_max > HPA_MAX_SHARDS_TOTAL) {
+		malloc_printf("<jemalloc>: hpa pools: nshards_max %u out of "
+		    "range (%u..%u)\n", configs->nshards_max,
+		    configs->npools, (unsigned)HPA_MAX_SHARDS_TOTAL);
 		return true;
 	}
 	if (configs->pick >= hpa_pool_pick_limit) {
@@ -114,7 +145,8 @@ hpa_pool_configs_clamp(hpa_pool_configs_t *configs) {
 	for (unsigned i = 0; i < configs->npools; i++) {
 		requested += configs->pools[i].nshards;
 	}
-	if (requested <= HPA_MAX_SHARDS_TOTAL) {
+	unsigned limit = configs->nshards_max;
+	if (requested <= limit) {
 		return;
 	}
 
@@ -128,14 +160,14 @@ hpa_pool_configs_clamp(hpa_pool_configs_t *configs) {
 	 * Reserving one shard for each pool still to come keeps every pool
 	 * non-empty while making the total impossible to exceed.
 	 */
-	unsigned remaining = HPA_MAX_SHARDS_TOTAL;
+	unsigned remaining = limit;
 	unsigned total = 0;
 	for (unsigned i = 0; i < configs->npools; i++) {
 		unsigned pools_after = configs->npools - i - 1;
 		assert(remaining > pools_after);
 		unsigned budget = remaining - pools_after;
 		unsigned scaled = (unsigned)(((uint64_t)configs->pools[i].nshards
-		    * HPA_MAX_SHARDS_TOTAL) / requested);
+		    * limit) / requested);
 		if (scaled == 0) {
 			scaled = 1;
 		}
@@ -146,11 +178,11 @@ hpa_pool_configs_clamp(hpa_pool_configs_t *configs) {
 		remaining -= scaled;
 		total += scaled;
 	}
-	assert(total <= HPA_MAX_SHARDS_TOTAL);
+	assert(total <= limit);
 
 	malloc_printf("<jemalloc>: hpa pools: requested %" FMTu64 " shards, "
 	    "clamped to %u (limit %u)\n",
-	    requested, total, (unsigned)HPA_MAX_SHARDS_TOTAL);
+	    requested, total, limit);
 }
 
 /* Returns the first pool whose requested-size-class bound covers key. */
@@ -396,25 +428,6 @@ hpa_pools_stats_merge(tsdn_t *tsdn, hpa_shard_stats_t *dst) {
 	}
 }
 
-size_t
-hpa_pools_ndirty(void) {
-	size_t ndirty = 0;
-	if (!hpa_pools_ready()) {
-		return ndirty;
-	}
-	for (unsigned i = 0; i < hpa_pools_global.npools; i++) {
-		hpa_pool_t *pool = &hpa_pools_global.pools[i];
-		for (unsigned j = 0; j < pool->nshards; j++) {
-			hpa_shard_t *shard = atomic_load_p(&pool->shards[j],
-			    ATOMIC_ACQUIRE);
-			if (shard != NULL) {
-				ndirty += psset_ndirty(&shard->psset);
-			}
-		}
-	}
-	return ndirty;
-}
-
 void
 hpa_pools_flush(tsdn_t *tsdn) {
 	if (hpa_pools_ready()) {
@@ -426,4 +439,53 @@ void
 hpa_pools_purge(tsdn_t *tsdn) {
 	hpa_pools_flush(tsdn);
 	hpa_pools_do_deferred_work(tsdn);
+}
+
+void
+hpa_pools_mtx_stats_read(tsdn_t *tsdn, mutex_prof_data_t *shard_data,
+    mutex_prof_data_t *grow_data, mutex_prof_data_t *sec_data) {
+	if (!hpa_pools_ready()) {
+		return;
+	}
+	for (unsigned i = 0; i < hpa_pools_global.npools; i++) {
+		hpa_pool_t *pool = &hpa_pools_global.pools[i];
+		for (unsigned j = 0; j < pool->nshards; j++) {
+			hpa_shard_t *shard = atomic_load_p(&pool->shards[j],
+			    ATOMIC_ACQUIRE);
+			if (shard == NULL) {
+				continue;
+			}
+			malloc_mutex_lock(tsdn, &shard->grow_mtx);
+			malloc_mutex_prof_accum(tsdn, grow_data,
+			    &shard->grow_mtx);
+			malloc_mutex_unlock(tsdn, &shard->grow_mtx);
+			malloc_mutex_lock(tsdn, &shard->mtx);
+			malloc_mutex_prof_accum(tsdn, shard_data, &shard->mtx);
+			malloc_mutex_unlock(tsdn, &shard->mtx);
+			sec_mutex_stats_read(tsdn, &shard->sec, sec_data);
+		}
+	}
+}
+
+void
+hpa_pools_mtx_prof_reset(tsdn_t *tsdn) {
+	if (!hpa_pools_ready()) {
+		return;
+	}
+	for (unsigned i = 0; i < hpa_pools_global.npools; i++) {
+		hpa_pool_t *pool = &hpa_pools_global.pools[i];
+		for (unsigned j = 0; j < pool->nshards; j++) {
+			hpa_shard_t *shard = atomic_load_p(&pool->shards[j],
+			    ATOMIC_ACQUIRE);
+			if (shard == NULL) {
+				continue;
+			}
+			malloc_mutex_lock(tsdn, &shard->grow_mtx);
+			malloc_mutex_prof_data_reset(tsdn, &shard->grow_mtx);
+			malloc_mutex_unlock(tsdn, &shard->grow_mtx);
+			malloc_mutex_lock(tsdn, &shard->mtx);
+			malloc_mutex_prof_data_reset(tsdn, &shard->mtx);
+			malloc_mutex_unlock(tsdn, &shard->mtx);
+		}
+	}
 }

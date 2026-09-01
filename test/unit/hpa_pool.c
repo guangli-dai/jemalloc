@@ -272,7 +272,8 @@ TEST_BEGIN(test_pick_arena_is_identity) {
 	hpa_pool_set_t    set;
 	hpa_pool_configs_t configs;
 	unsigned          narenas = 10;
-	expect_false(hpa_pool_configs_identity(&configs, narenas),
+	expect_false(hpa_pool_configs_identity(&configs, narenas,
+	    HPA_MAX_SHARDS_PER_POOL),
 	    "identity configuration should fit");
 
 	expect_u_eq(configs.npools, 1, "identity configs should have one pool");
@@ -297,13 +298,14 @@ TEST_BEGIN(test_pick_arena_is_identity) {
 }
 TEST_END
 
-TEST_BEGIN(test_identity_rejects_too_many_arenas) {
+TEST_BEGIN(test_identity_caps_many_arenas) {
 	hpa_pool_configs_t configs;
-	expect_true(hpa_pool_configs_identity(&configs,
-	    HPA_MAX_SHARDS_PER_POOL + 1),
-	    "identity routing must not silently merge arena shards");
-	expect_u_eq(configs.npools, 0,
-	    "a rejected identity configuration should remain empty");
+	expect_false(hpa_pool_configs_identity(&configs,
+	    HPA_MAX_SHARDS_PER_POOL + 1, HPA_POOL_NSHARDS_MAX_DEFAULT),
+	    "the configured identity cap should be valid");
+	expect_u_eq(configs.pools[0].nshards,
+	    HPA_POOL_NSHARDS_MAX_DEFAULT,
+	    "identity configuration should apply its explicit cap");
 }
 TEST_END
 
@@ -350,6 +352,7 @@ TEST_END
 TEST_BEGIN(test_configs_validate) {
 	hpa_pool_configs_t configs;
 	memset(&configs, 0, sizeof(configs));
+	configs.nshards_max = HPA_MAX_SHARDS_TOTAL;
 	configs.npools = 2;
 	configs.pick = hpa_pool_pick_arena;
 	configs.pools[0].size_max = POOL_SMALL_MAX;
@@ -417,6 +420,7 @@ TEST_BEGIN(test_layout_clamp_respects_the_limit) {
 	for (unsigned c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
 		hpa_pool_configs_t configs;
 		memset(&configs, 0, sizeof(configs));
+		configs.nshards_max = HPA_MAX_SHARDS_TOTAL;
 		configs.npools = cases[c].npools;
 		unsigned before = 0;
 		for (unsigned i = 0; i < configs.npools; i++) {
@@ -456,7 +460,7 @@ main(void) {
 	    test_route_uses_allocation_size_for_slabs,
 	    test_pick_stays_within_pool,
 	    test_pool_local_shard_ids, test_pick_arena_is_identity,
-	    test_identity_rejects_too_many_arenas,
+	    test_identity_caps_many_arenas,
 	    test_pick_roundrobin_spreads, test_pick_roundrobin_wraps,
 	    test_single_shard_pool);
 }

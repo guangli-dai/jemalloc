@@ -82,7 +82,8 @@ pac_sec_dirty_npages_get(const sec_stats_t *stats) {
 /*
  * PAC only.  HPA dirty pages are no longer attributable to an arena -- a shard
  * serves every arena that routes to its pool -- so they are counted once,
- * process-wide, by hpa_pools_ndirty(); ctl folds that into stats.resident.
+ * process-wide, by hpa_pools_stats_merge(); ctl folds that into
+ * stats.resident.
  * Dropping them here without adding them back there would silently
  * under-report memory, with nothing failing to say so.
  */

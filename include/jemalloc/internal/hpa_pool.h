@@ -6,6 +6,7 @@
 #include "jemalloc/internal/base.h"
 #include "jemalloc/internal/edata.h"
 #include "jemalloc/internal/hpa.h"
+#include "jemalloc/internal/mutex_prof.h"
 #include "jemalloc/internal/psset.h"
 #include "jemalloc/internal/sz.h"
 
@@ -47,6 +48,7 @@ extern const char *const hpa_pool_pick_type_names[];
  * metadata is allocated only when a slot is first selected.
  */
 #define HPA_MAX_SHARDS_PER_POOL 1024
+#define HPA_POOL_NSHARDS_MAX_DEFAULT 64
 
 typedef struct hpa_pool_s hpa_pool_t;
 typedef struct hpa_pool_set_s hpa_pool_set_t;
@@ -83,7 +85,13 @@ struct hpa_pool_configs_s {
 	unsigned npools;
 	hpa_pool_config_t pools[HPA_MAX_POOLS];
 	hpa_pool_pick_t pick;
+	/* Maximum total shard count after proportional clamping. */
+	unsigned nshards_max;
 };
+
+extern bool opt_hpa_shard_pools;
+extern hpa_pool_configs_t opt_hpa_pool_configs;
+extern size_t opt_hpa_pool_nshards_max;
 
 struct hpa_pool_set_s {
 	bool initialized;
@@ -114,6 +122,12 @@ hpa_pools_nshards(const hpa_pool_set_t *set) {
 		total += set->pools[i].nshards;
 	}
 	return total;
+}
+
+static inline bool
+hpa_pools_shard_is_stable(void) {
+	return hpa_pools_ready()
+	    && hpa_pools_global.pools[0].pick == hpa_pool_pick_arena;
 }
 
 /* Stable pageslab owner id for a pool-local shard slot. */
@@ -152,7 +166,11 @@ hpa_shard_from_edata(const edata_t *edata) {
  * arena-based shard selection.  Returns true if narenas does not fit in the
  * fixed shard array; an identity configuration is not produced in that case.
  */
-bool hpa_pool_configs_identity(hpa_pool_configs_t *configs, unsigned narenas);
+void hpa_pool_configs_init(hpa_pool_configs_t *configs);
+bool hpa_pool_configs_add(hpa_pool_configs_t *configs, size_t size_start,
+    size_t size_end, unsigned nshards);
+bool hpa_pool_configs_identity(hpa_pool_configs_t *configs, unsigned narenas,
+    unsigned nshards_max);
 
 bool hpa_pool_configs_validate(const hpa_pool_configs_t *configs);
 
@@ -194,9 +212,12 @@ void hpa_pools_set_deferral_allowed(tsdn_t *tsdn, bool allowed);
 void hpa_pools_do_deferred_work(tsdn_t *tsdn);
 uint64_t hpa_pools_time_until_deferred_work(tsdn_t *tsdn);
 void hpa_pools_stats_merge(tsdn_t *tsdn, hpa_shard_stats_t *dst);
-size_t hpa_pools_ndirty(void);
 void hpa_pools_flush(tsdn_t *tsdn);
 void hpa_pools_purge(tsdn_t *tsdn);
+void hpa_pools_mtx_stats_read(tsdn_t *tsdn,
+    mutex_prof_data_t *shard_data, mutex_prof_data_t *grow_data,
+    mutex_prof_data_t *sec_data);
+void hpa_pools_mtx_prof_reset(tsdn_t *tsdn);
 
 /* The two composed: the whole of the allocation-side routing decision. */
 JEMALLOC_ALWAYS_INLINE hpa_shard_t *

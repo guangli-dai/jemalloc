@@ -1,5 +1,7 @@
 #include "test/jemalloc_test.h"
 
+#include "jemalloc/internal/hpa_pool.h"
+
 #include "jemalloc/internal/ctl.h"
 #include "jemalloc/internal/arena.h"
 #include "jemalloc/internal/util.h"
@@ -535,6 +537,9 @@ TEST_BEGIN(test_mallctl_opt) {
 	TEST_MALLCTL_OPT(size_t, hpa_purge_threshold, always);
 	TEST_MALLCTL_OPT(uint64_t, hpa_min_purge_delay_ms, always);
 	TEST_MALLCTL_OPT(const char *, hpa_hugify_style, always);
+	TEST_MALLCTL_OPT(bool, hpa_shard_pools, always);
+	TEST_MALLCTL_OPT(size_t, hpa_pool_nshards_max, always);
+	TEST_MALLCTL_OPT(const char *, hpa_pool_pick, always);
 	TEST_MALLCTL_OPT(unsigned, narenas, always);
 	TEST_MALLCTL_OPT(const char *, percpu_arena, always);
 	TEST_MALLCTL_OPT(size_t, oversize_threshold, always);
@@ -2086,6 +2091,78 @@ TEST_BEGIN(test_stats_arenas) {
 }
 TEST_END
 
+TEST_BEGIN(test_hpa_topology) {
+	/*
+	 * What was actually built, as opposed to what was configured.  Worth
+	 * its own nodes because the two diverge silently: the feature switch
+	 * being off, or the shard-count clamp firing, both leave a process
+	 * running a topology nobody asked for.
+	 */
+	unsigned npools, nshards;
+	size_t   sz = sizeof(npools);
+	expect_d_eq(mallctl("hpa.npools", &npools, &sz, NULL, 0), 0,
+	    "hpa.npools should be readable");
+	sz = sizeof(nshards);
+	expect_d_eq(mallctl("hpa.nshards", &nshards, &sz, NULL, 0), 0,
+	    "hpa.nshards should be readable");
+
+	if (!opt_hpa) {
+		expect_u_eq(npools, 0, "no pools should exist without the HPA");
+		expect_u_eq(nshards, 0, "no shards should exist without it");
+		return;
+	}
+	expect_u_gt(npools, 0, "the HPA is on but has no pools");
+	expect_u_ge(nshards, npools, "every pool needs at least one shard");
+	expect_u_le(nshards, HPA_MAX_SHARDS_TOTAL,
+	    "more shards than an extent's owner field can address");
+
+	/* Requested-size bands must tile [1, HUGEPAGE]. */
+	size_t expect_min = 1;
+	unsigned expect_first = 0;
+	for (unsigned i = 0; i < npools; i++) {
+		char        name[128];
+		size_t      size_min, size_max, sz;
+		unsigned    pool_nshards, first_shard;
+		const char *pick;
+
+#define POOL_GET(field, out)                                                   \
+	malloc_snprintf(name, sizeof(name), "hpa.pool.%u." field, i);          \
+	sz = sizeof(out);                                                      \
+	expect_d_eq(mallctl(name, &out, &sz, NULL, 0), 0,                      \
+	    "%s should be readable", name);
+		POOL_GET("size_min", size_min)
+		POOL_GET("size_max", size_max)
+		POOL_GET("nshards", pool_nshards)
+		POOL_GET("first_shard", first_shard)
+		POOL_GET("pick", pick)
+#undef POOL_GET
+
+		expect_zu_eq(size_min, expect_min,
+		    "pool %u starts at %zu, leaving a gap after %zu", i,
+		    size_min, expect_min);
+		expect_zu_ge(size_max, size_min, "pool %u has an empty band", i);
+		expect_u_eq(first_shard, expect_first,
+		    "pool %u's shards do not follow the previous pool's", i);
+		expect_u_gt(pool_nshards, 0, "pool %u has no shards", i);
+		expect_ptr_not_null(pick, "pool %u has no picker name", i);
+		expect_min = size_max + 1;
+		expect_first += pool_nshards;
+	}
+	expect_zu_eq(expect_min, HUGEPAGE + 1,
+	    "the last band does not reach HUGEPAGE");
+	expect_u_eq(expect_first, nshards,
+	    "the pools' shards do not add up to hpa.nshards");
+
+	/* One past the end must not resolve. */
+	char   past[128];
+	size_t past_size_min;
+	size_t past_sz = sizeof(past_size_min);
+	malloc_snprintf(past, sizeof(past), "hpa.pool.%u.size_min", npools);
+	expect_d_ne(mallctl(past, &past_size_min, &past_sz, NULL, 0), 0,
+	    "%s should not exist", past);
+}
+TEST_END
+
 TEST_BEGIN(test_stats_arenas_hpa_shard_counters) {
 	test_skip_if(!config_stats);
 
@@ -2436,7 +2513,8 @@ main(void) {
 	    test_arena_i_reset_destroy_errors, test_thread_prof_name_errors,
 	    test_ctl_ro_macro_errors,
 	    test_arena_i_dirty_decay_ms, test_arena_i_muzzy_decay_ms,
-	    test_arena_i_purge, test_hpa_purge, test_arena_i_decay,
+	    test_arena_i_purge, test_hpa_purge, test_hpa_topology,
+	    test_arena_i_decay,
 	    test_arena_i_dss,
 	    test_arena_i_name, test_arena_i_retain_grow_limit,
 	    test_arenas_dirty_decay_ms, test_arenas_muzzy_decay_ms,

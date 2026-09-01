@@ -6,6 +6,12 @@
 #include "jemalloc/internal/nstime.h"
 #include "jemalloc/internal/tsd_types.h"
 
+/*
+ * The HPA locks are global rather than per-arena: one shard is contended by
+ * every arena that routes to its pool, so there is no arena to attribute the
+ * contention to.  The figures reported here are summed over every shard in the
+ * process.
+ */
 #define MUTEX_PROF_GLOBAL_MUTEXES                                              \
 	OP(background_thread)                                                  \
 	OP(max_per_bg_thd)                                                     \
@@ -15,7 +21,10 @@
 	OP(prof_dump)                                                          \
 	OP(prof_recent_alloc)                                                  \
 	OP(prof_recent_dump)                                                   \
-	OP(prof_stats)
+	OP(prof_stats)                                                         \
+	OP(hpa_shard)                                                          \
+	OP(hpa_shard_grow)                                                     \
+	OP(hpa_sec)
 
 typedef enum {
 #define OP(mtx) global_prof_mutex_##mtx,
@@ -35,9 +44,6 @@ typedef enum {
 	OP(decay_muzzy)                                                        \
 	OP(base)                                                               \
 	OP(tcache_list)                                                        \
-	OP(hpa_shard)                                                          \
-	OP(hpa_shard_grow)                                                     \
-	OP(hpa_sec)                                                            \
 	OP(pac_sec)
 
 typedef enum {

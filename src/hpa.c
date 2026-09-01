@@ -1156,16 +1156,6 @@ hpa_sec_flush_impl(tsdn_t *tsdn, hpa_shard_t *shard) {
 }
 
 void
-hpa_shard_disable(tsdn_t *tsdn, hpa_shard_t *shard) {
-	hpa_do_consistency_checks(shard);
-	hpa_sec_flush_impl(tsdn, shard);
-
-	malloc_mutex_lock(tsdn, &shard->mtx);
-	edata_cache_fast_disable(tsdn, &shard->ecf);
-	malloc_mutex_unlock(tsdn, &shard->mtx);
-}
-
-void
 hpa_shard_flush(tsdn_t *tsdn, hpa_shard_t *shard) {
 	hpa_sec_flush_impl(tsdn, shard);
 }
@@ -1188,6 +1178,12 @@ hpa_assert_empty(tsdn_t *tsdn, hpa_shard_t *shard, psset_t *psset) {
 	}
 }
 
+/*
+ * Tear a shard all the way down, unmapping every hugepage it holds.
+ *
+ * Pool shards live for the process after lazy initialization, so allocator
+ * teardown does not call this.  Unit tests use it to verify an empty shard.
+ */
 void
 hpa_shard_destroy(tsdn_t *tsdn, hpa_shard_t *shard) {
 	hpa_do_consistency_checks(shard);

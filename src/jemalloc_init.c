@@ -589,8 +589,18 @@ malloc_init_hard(void) {
 		hpa_shard_opts.deferral_allowed = background_thread_enabled();
 
 		hpa_pool_configs_t configs;
-		if (hpa_pool_configs_identity(&configs, narenas_total_get())) {
-			UNLOCK_RETURN(tsd_tsdn(tsd), true, true)
+		unsigned nshards_max = (unsigned)opt_hpa_pool_nshards_max;
+		if (opt_hpa_shard_pools && opt_hpa_pool_configs.npools > 0) {
+			configs = opt_hpa_pool_configs;
+			configs.nshards_max = nshards_max;
+		} else {
+			if (hpa_pool_configs_identity(&configs,
+			        narenas_total_get(), nshards_max)) {
+				UNLOCK_RETURN(tsd_tsdn(tsd), true, true)
+			}
+			if (opt_hpa_shard_pools) {
+				configs.pick = opt_hpa_pool_configs.pick;
+			}
 		}
 
 		if (hpa_pools_boot(tsd_tsdn(tsd), &hpa_pools_global, b0get(),
