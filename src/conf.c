@@ -472,6 +472,20 @@ validate_hpa_settings(void) {
 	if (!hpa_supported() || !opt_hpa) {
 		return;
 	}
+	/*
+	 * Check a configured layout even when opt_hpa_shard_pools is off and it
+	 * is therefore about to be ignored.  Otherwise a layout that cannot
+	 * work -- one that stops short of HUGEPAGE, say -- is accepted quietly
+	 * and only fails at the moment someone turns the switch on, which is
+	 * the worst possible time to find out.
+	 */
+	if (opt_hpa_pool_layout.npools > 0) {
+		hpa_pool_layout_t check = opt_hpa_pool_layout;
+		check.nshards_max = (unsigned)opt_hpa_pool_nshards_max;
+		if (hpa_pool_layout_validate(&check)) {
+			had_conf_error = true;
+		}
+	}
 	if (HUGEPAGE > HUGEPAGE_MAX_EXPECTED_SIZE) {
 		had_conf_error = true;
 		malloc_printf(

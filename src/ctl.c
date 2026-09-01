@@ -1632,22 +1632,28 @@ ctl_refresh(tsdn_t *tsdn) {
 #undef READ_GLOBAL_MUTEX_PROF_DATA
 
 		/*
-		 * The HPA locks are summed rather than read, since there is one
-		 * set per shard.  Zero first: unlike the singletons above,
-		 * accumulating into last epoch's figures would double-count.
+		 * The HPA locks are summed from the per-pool figures gathered
+		 * above, rather than read from the shards again.
+		 *
+		 * A second walk would not merely cost more locking: taking a
+		 * profiled mutex increments its own profile, so the walk that
+		 * ran second would report every lock operation the first one
+		 * performed.  The whole would then exceed the sum of its parts
+		 * within a single epoch, for no reason a reader could see.
 		 */
-		memset(&ctl_stats->mutex_prof_data[global_prof_mutex_hpa_shard],
-		    0, sizeof(mutex_prof_data_t));
-		memset(&ctl_stats
-		           ->mutex_prof_data[global_prof_mutex_hpa_shard_grow],
-		    0, sizeof(mutex_prof_data_t));
-		memset(&ctl_stats->mutex_prof_data[global_prof_mutex_hpa_sec],
-		    0, sizeof(mutex_prof_data_t));
-		hpa_pools_mtx_stats_read(tsdn,
-		    &ctl_stats->mutex_prof_data[global_prof_mutex_hpa_shard],
-		    &ctl_stats
-		         ->mutex_prof_data[global_prof_mutex_hpa_shard_grow],
-		    &ctl_stats->mutex_prof_data[global_prof_mutex_hpa_sec]);
+		for (unsigned m = 0; m < hpa_pool_mutex_limit; m++) {
+			static const mutex_prof_global_ind_t hpa_mutex_ind[]
+			    = {global_prof_mutex_hpa_shard,
+			        global_prof_mutex_hpa_shard_grow,
+			        global_prof_mutex_hpa_sec};
+			mutex_prof_data_t *dst
+			    = &ctl_stats->mutex_prof_data[hpa_mutex_ind[m]];
+			memset(dst, 0, sizeof(*dst));
+			for (unsigned i = 0; i < HPA_MAX_POOLS; i++) {
+				malloc_mutex_prof_merge(dst,
+				    &ctl_stats->hpapoolstats[i].mutexes[m]);
+			}
+		}
 	}
 	ctl_arenas->epoch++;
 }

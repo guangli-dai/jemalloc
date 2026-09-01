@@ -26,24 +26,47 @@
  */
 
 /*
- * Band bounds and thresholds are byte literals -- MALLOC_CONF is a string --
- * so this configuration describes one page geometry and the test skips
- * elsewhere.
+ * Band bounds and thresholds are byte literals -- MALLOC_CONF is a string and
+ * PAGE is not a preprocessor constant -- so a configuration has to be written
+ * per page geometry.  The two the project builds and tests are covered; any
+ * other geometry skips rather than being handed a layout that cannot tile
+ * [PAGE, HUGEPAGE].
+ *
+ * Only the lower bound of the first band differs between them: the interesting
+ * numbers -- a half-hugepage band boundary and a half-hugepage threshold -- are
+ * absolute sizes, not multiples of a page.
  */
-#if LG_PAGE == 12 && LG_HUGEPAGE == 21
+/*
+ * Numbers used in both the configuration string and the assertions are written
+ * once and stringified (STRINGIFY, from util.h), so the two cannot drift apart
+ * -- which is exactly what happened first time round, when a purge_threshold
+ * legal at 4 KiB pages turned out to be below a page at 64 KiB ones.
+ */
+#define BIG_SIZE       ((size_t)1024 * 1024)
+#define BIG_THRESHOLD  1048576
+#define SMALL_BAND_MAX 524288
+/* Above a page in both geometries, and unlike the default in either. */
+#define SMALL_PURGE_THRESHOLD 131072
+
+#if LG_HUGEPAGE == 21 && (LG_PAGE == 12 || LG_PAGE == 16)
+#if LG_PAGE == 12
+#define FIRST_BAND_MIN "4096"
+#else
+#define FIRST_BAND_MIN "65536"
+#endif
+#define SMALL_BAND FIRST_BAND_MIN "-" STRINGIFY(SMALL_BAND_MAX)
+#define BIG_BAND   "524289-2097152"
 #define POOLS_CONF                                                             \
-	"hpa_pools:4096-524288:1|524289-2097152:1,"                            \
-	"hpa_pool_opts:524289-2097152:hugification_threshold=1048576"          \
-	"|524289-2097152:hugify_delay_ms=0"                                    \
-	"|524289-2097152:dirty_mult=-1"                                        \
-	"|524289-2097152:sec_nshards=0"                                        \
-	"|4096-524288:purge_threshold=8192,"
-#define BIG_SIZE      ((size_t)1024 * 1024)
-#define BIG_THRESHOLD ((size_t)1024 * 1024)
+	"hpa_pools:" SMALL_BAND ":1|" BIG_BAND ":1,"                           \
+	"hpa_pool_opts:" BIG_BAND                                              \
+	":hugification_threshold=" STRINGIFY(BIG_THRESHOLD)                    \
+	"|" BIG_BAND ":hugify_delay_ms=0"                                      \
+	"|" BIG_BAND ":dirty_mult=-1"                                          \
+	"|" BIG_BAND ":sec_nshards=0"                                          \
+	"|" SMALL_BAND                                                         \
+	":purge_threshold=" STRINGIFY(SMALL_PURGE_THRESHOLD) ","
 #else
 #define POOLS_CONF ""
-#define BIG_SIZE      ((size_t)1024 * 1024)
-#define BIG_THRESHOLD ((size_t)1024 * 1024)
 #endif
 
 const char *malloc_conf = POOLS_CONF
@@ -56,8 +79,6 @@ const char *malloc_conf = POOLS_CONF
 #define NPOOLS_EXPECTED 2
 #define BIG_POOL        1
 #define SMALL_POOL      0
-
-#define SMALL_BAND_MAX ((size_t)512 * 1024)
 
 /*
  * An outer MALLOC_CONF overrides a test's own settings, so the bands this file
@@ -73,7 +94,8 @@ pools_configured(void) {
 	    || hpa_pools_global.npools != NPOOLS_EXPECTED) {
 		return false;
 	}
-	return hpa_pools_global.pools[SMALL_POOL].size_max == SMALL_BAND_MAX
+	return hpa_pools_global.pools[SMALL_POOL].size_max
+	        == (size_t)SMALL_BAND_MAX
 	    && hpa_pools_global.pools[BIG_POOL].size_max == HUGEPAGE;
 }
 
@@ -101,7 +123,7 @@ TEST_BEGIN(test_overrides_reach_the_shards) {
 	hpa_shard_t *big = pool_shard(BIG_POOL, 0);
 	hpa_shard_t *small = pool_shard(SMALL_POOL, 0);
 
-	expect_zu_eq(big->opts.hugification_threshold, BIG_THRESHOLD,
+	expect_zu_eq(big->opts.hugification_threshold, (size_t)BIG_THRESHOLD,
 	    "the big band did not get its own hugification threshold");
 	expect_u64_eq(big->opts.hugify_delay_ms, 0,
 	    "the big band did not get its own hugify delay");
@@ -117,7 +139,7 @@ TEST_BEGIN(test_overrides_reach_the_shards) {
 	    "the small band lost the global hugification threshold");
 	expect_u64_eq(small->opts.hugify_delay_ms, opt_hpa_opts.hugify_delay_ms,
 	    "the small band lost the global hugify delay");
-	expect_zu_eq(small->opts.purge_threshold, 8192,
+	expect_zu_eq(small->opts.purge_threshold, SMALL_PURGE_THRESHOLD,
 	    "the small band did not get its own purge threshold");
 	expect_u32_eq((uint32_t)big->opts.dirty_mult, (uint32_t)-1,
 	    "the big band did not get its own dirty_mult");
@@ -218,7 +240,7 @@ TEST_BEGIN(test_lowered_threshold_hugifies) {
 	 */
 	expect_zu_eq(shard->psset.stats.slabs[1].nactive, BIG_SIZE / PAGE,
 	    "a %zu-byte extent should be on a hugified pageslab under a "
-	    "%zu-byte threshold", BIG_SIZE, BIG_THRESHOLD);
+	    "%zu-byte threshold", BIG_SIZE, (size_t)BIG_THRESHOLD);
 	expect_zu_eq(shard->psset.stats.slabs[0].nactive, 0,
 	    "no active pages should be left on a non-huge pageslab");
 	expect_u64_ge(shard->stats.nhugifies, 1,

@@ -6,26 +6,14 @@
 
 const char *const hpa_pool_pick_names[] = {"arena", "roundrobin"};
 
-const char *const hpa_pool_opt_names[] = {"slab_max_alloc",
-    "hugification_threshold", "dirty_mult", "hugify_delay_ms", "hugify_sync",
-    "min_purge_interval_ms", "purge_threshold", "min_purge_delay_ms",
-    "hugify_style", "sec_nshards", "sec_max_alloc", "sec_max_bytes"};
-
-/*
- * Four things have to stay in step for a per-pool option to work: the enum,
- * this name table, the switch in hpa_pool_layout_set_opt() and the fold in
- * hpa_pool_opts_apply().  Adding an enumerator without the name would read off
- * the end of the table; adding it without the fold would accept the option and
- * silently ignore it, which is worse.  The table length is checked here; the
- * other two are checked at the end of the fold.
- */
-/* A negative array bound, for want of a static_assert idiom in this tree. */
-typedef char hpa_pool_opt_names_length_check[(sizeof(hpa_pool_opt_names)
-                                                     / sizeof(
-                                                         hpa_pool_opt_names[0])
-                                                 == hpa_pool_opt_limit)
-        ? 1
-        : -1];
+const char *const hpa_pool_opt_names[] = {
+#define OP(field) #field,
+    HPA_POOL_SHARD_OPTS
+#undef OP
+#define OP(field) "sec_" #field,
+	HPA_POOL_SEC_OPTS
+#undef OP
+};
 
 void
 hpa_pool_layout_identity(hpa_pool_layout_t *layout, unsigned narenas,
@@ -276,59 +264,25 @@ static void
 hpa_pool_opts_apply(hpa_shard_opts_t *opts, sec_opts_t *sec_opts,
     const hpa_pool_layout_entry_t *entry) {
 	uint32_t set = entry->opts_set;
-#define APPLY(which, dst, src)                                                 \
-	if ((set & ((uint32_t)1 << (which))) != 0) {                           \
-		dst = src;                                                     \
-	}
-	APPLY(hpa_pool_opt_slab_max_alloc, opts->slab_max_alloc,
-	    entry->opts.slab_max_alloc)
-	APPLY(hpa_pool_opt_hugification_threshold, opts->hugification_threshold,
-	    entry->opts.hugification_threshold)
-	APPLY(hpa_pool_opt_dirty_mult, opts->dirty_mult, entry->opts.dirty_mult)
-	APPLY(hpa_pool_opt_hugify_delay_ms, opts->hugify_delay_ms,
-	    entry->opts.hugify_delay_ms)
-	APPLY(hpa_pool_opt_hugify_sync, opts->hugify_sync,
-	    entry->opts.hugify_sync)
-	APPLY(hpa_pool_opt_min_purge_interval_ms, opts->min_purge_interval_ms,
-	    entry->opts.min_purge_interval_ms)
-	APPLY(hpa_pool_opt_purge_threshold, opts->purge_threshold,
-	    entry->opts.purge_threshold)
-	APPLY(hpa_pool_opt_min_purge_delay_ms, opts->min_purge_delay_ms,
-	    entry->opts.min_purge_delay_ms)
-	APPLY(hpa_pool_opt_hugify_style, opts->hugify_style,
-	    entry->opts.hugify_style)
-	APPLY(hpa_pool_opt_sec_nshards, sec_opts->nshards,
-	    entry->sec_opts.nshards)
-	APPLY(hpa_pool_opt_sec_max_alloc, sec_opts->max_alloc,
-	    entry->sec_opts.max_alloc)
-	APPLY(hpa_pool_opt_sec_max_bytes, sec_opts->max_bytes,
-	    entry->sec_opts.max_bytes)
-#undef APPLY
-
 	/*
-	 * Every bit the parser can set must have been consumed above.  An
-	 * enumerator added to hpa_pool_opt_t and to the parser but not to the
-	 * fold would otherwise be accepted from MALLOC_CONF and quietly do
-	 * nothing.
+	 * Generated from the same lists as the enum and the names, so an
+	 * option cannot be accepted from MALLOC_CONF and then quietly not
+	 * applied -- which is the drift that would be hardest to notice, since
+	 * it looks exactly like the option not working.
 	 */
+#define OP(field)                                                              \
+	if ((set & ((uint32_t)1 << hpa_pool_opt_##field)) != 0) {              \
+		opts->field = entry->opts.field;                               \
+	}
+	HPA_POOL_SHARD_OPTS
+#undef OP
+#define OP(field)                                                              \
+	if ((set & ((uint32_t)1 << hpa_pool_opt_sec_##field)) != 0) {          \
+		sec_opts->field = entry->sec_opts.field;                       \
+	}
+	HPA_POOL_SEC_OPTS
+#undef OP
 	assert((set & ~(((uint32_t)1 << hpa_pool_opt_limit) - 1)) == 0);
-#define APPLIED(which) | ((uint32_t)1 << (which))
-	static const uint32_t handled = 0 APPLIED(hpa_pool_opt_slab_max_alloc)
-	    APPLIED(hpa_pool_opt_hugification_threshold)
-	        APPLIED(hpa_pool_opt_dirty_mult)
-	            APPLIED(hpa_pool_opt_hugify_delay_ms)
-	                APPLIED(hpa_pool_opt_hugify_sync)
-	                    APPLIED(hpa_pool_opt_min_purge_interval_ms)
-	                        APPLIED(hpa_pool_opt_purge_threshold)
-	                            APPLIED(hpa_pool_opt_min_purge_delay_ms)
-	                                APPLIED(hpa_pool_opt_hugify_style)
-	                                    APPLIED(hpa_pool_opt_sec_nshards)
-	                                        APPLIED(hpa_pool_opt_sec_max_alloc)
-	                                            APPLIED(
-	                                                hpa_pool_opt_sec_max_bytes);
-#undef APPLIED
-	assert(handled == ((uint32_t)1 << hpa_pool_opt_limit) - 1);
-	assert((set & ~handled) == 0);
 }
 
 /*
@@ -338,7 +292,7 @@ hpa_pool_opts_apply(hpa_shard_opts_t *opts, sec_opts_t *sec_opts,
  * function over [PAGE, HUGEPAGE] is, because the router would then have sizes
  * with no pool and pa_alloc() would silently fall through to the PAC.
  */
-JET_EXTERN bool
+bool
 hpa_pool_layout_validate(const hpa_pool_layout_t *layout) {
 	if (layout->npools == 0 || layout->npools > HPA_MAX_POOLS) {
 		malloc_printf("<jemalloc>: hpa pools: npools %u out of range "
@@ -838,27 +792,6 @@ hpa_pools_stats_merge(tsdn_t *tsdn, hpa_shard_stats_t *dst,
 			    += stats.nonderived_stats.nhugify_failures;
 			out->ndehugifies += stats.nonderived_stats.ndehugifies;
 		}
-	}
-}
-
-void
-hpa_pools_mtx_stats_read(tsdn_t *tsdn, mutex_prof_data_t *shard_data,
-    mutex_prof_data_t *grow_data, mutex_prof_data_t *sec_data) {
-	if (!hpa_pools_ready()) {
-		return;
-	}
-	for (unsigned i = 0; i < hpa_pools_global.nshards_total; i++) {
-		hpa_shard_t *shard = &hpa_pools_global.shards[i];
-
-		malloc_mutex_lock(tsdn, &shard->grow_mtx);
-		malloc_mutex_prof_accum(tsdn, grow_data, &shard->grow_mtx);
-		malloc_mutex_unlock(tsdn, &shard->grow_mtx);
-
-		malloc_mutex_lock(tsdn, &shard->mtx);
-		malloc_mutex_prof_accum(tsdn, shard_data, &shard->mtx);
-		malloc_mutex_unlock(tsdn, &shard->mtx);
-
-		sec_mutex_stats_read(tsdn, &shard->sec, sec_data);
 	}
 }
 

@@ -157,20 +157,45 @@ struct hpa_pool_s {
  * inherits may be parsed after the override that refines it.  The set bits say
  * which fields to apply on top of whatever the globals ended up being.
  */
+/*
+ * The settable options, as one list.
+ *
+ * Four things have to agree for an override to work: the enumerator, the name
+ * MALLOC_CONF uses, the parser that reads the value, and the fold that applies
+ * it over the process-wide default.  Three of them are generated from the list
+ * below, so they cannot drift.  The fourth, the parser, is hand-written per
+ * option because each value has its own type and range -- but an option
+ * missing from it falls through to a "no such option" error rather than being
+ * silently accepted, which is the safe direction.
+ *
+ * The name is the struct field name, so that the fold can be generated: an
+ * hpa_shard_opts_t field is named exactly as the option is, and a sec_opts_t
+ * field is named as the option minus its "sec_" prefix.
+ */
+#define HPA_POOL_SHARD_OPTS                                                    \
+	OP(slab_max_alloc)                                                     \
+	OP(hugification_threshold)                                             \
+	OP(dirty_mult)                                                         \
+	OP(hugify_delay_ms)                                                    \
+	OP(hugify_sync)                                                        \
+	OP(min_purge_interval_ms)                                              \
+	OP(purge_threshold)                                                    \
+	OP(min_purge_delay_ms)                                                 \
+	OP(hugify_style)
+
+#define HPA_POOL_SEC_OPTS                                                      \
+	OP(nshards)                                                            \
+	OP(max_alloc)                                                          \
+	OP(max_bytes)
+
 typedef enum hpa_pool_opt_e {
-	hpa_pool_opt_slab_max_alloc,
-	hpa_pool_opt_hugification_threshold,
-	hpa_pool_opt_dirty_mult,
-	hpa_pool_opt_hugify_delay_ms,
-	hpa_pool_opt_hugify_sync,
-	hpa_pool_opt_min_purge_interval_ms,
-	hpa_pool_opt_purge_threshold,
-	hpa_pool_opt_min_purge_delay_ms,
-	hpa_pool_opt_hugify_style,
-	hpa_pool_opt_sec_nshards,
-	hpa_pool_opt_sec_max_alloc,
-	hpa_pool_opt_sec_max_bytes,
-	hpa_pool_opt_limit
+#define OP(field) hpa_pool_opt_##field,
+	HPA_POOL_SHARD_OPTS
+#undef OP
+#define OP(field) hpa_pool_opt_sec_##field,
+	HPA_POOL_SEC_OPTS
+#undef OP
+	    hpa_pool_opt_limit
 } hpa_pool_opt_t;
 
 /* Names as they appear in MALLOC_CONF, indexed by hpa_pool_opt_t. */
@@ -396,12 +421,13 @@ void hpa_pools_stats_merge(tsdn_t *tsdn, hpa_shard_stats_t *dst,
     hpa_pool_stats_t *pool_dst, unsigned npools);
 
 /*
- * Mutex contention, likewise process-wide.  stats.mutexes.hpa_* sums every
- * shard; there is no arena that could own the figure, and these are the locks
- * the packing-versus-contention tradeoff is actually paid in.
+ * Mutex profiles are reset here rather than by whoever resets the arena ones,
+ * for the same reason the figures are reported globally: no arena owns these
+ * locks.  The figures themselves come out of the per-pool stats above, summed
+ * by ctl -- walking the shards a second time to read them would count the
+ * reader's own lock operations, and the whole would exceed the sum of its
+ * parts.
  */
-void hpa_pools_mtx_stats_read(tsdn_t *tsdn, mutex_prof_data_t *shard_data,
-    mutex_prof_data_t *grow_data, mutex_prof_data_t *sec_data);
 void hpa_pools_mtx_prof_reset(tsdn_t *tsdn);
 
 /*
@@ -434,6 +460,18 @@ bool hpa_pool_layout_add(hpa_pool_layout_t *layout, size_t size_start,
 bool hpa_pool_layout_set_opt(hpa_pool_layout_t *layout, size_t size_start,
     size_t size_end, const char *key, size_t keylen, const char *val,
     size_t vallen);
+
+/*
+ * Check the whole-layout properties that hpa_pool_layout_add() cannot see one
+ * band at a time: reaching HUGEPAGE, page alignment, a shard for every pool,
+ * a cap that leaves room for one each.  Returns true on error, having said
+ * what is wrong.
+ *
+ * Called at boot, and also by the configuration reader on a layout the feature
+ * switch is about to discard -- so that a layout which cannot work is rejected
+ * where it is written rather than at the moment someone turns the switch on.
+ */
+bool hpa_pool_layout_validate(const hpa_pool_layout_t *layout);
 
 /*
  * The identity layout: one pool spanning everything, one shard per arena,
