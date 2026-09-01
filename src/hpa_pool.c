@@ -11,6 +11,22 @@ const char *const hpa_pool_opt_names[] = {"slab_max_alloc",
     "min_purge_interval_ms", "purge_threshold", "min_purge_delay_ms",
     "hugify_style", "sec_nshards", "sec_max_alloc", "sec_max_bytes"};
 
+/*
+ * Four things have to stay in step for a per-pool option to work: the enum,
+ * this name table, the switch in hpa_pool_layout_set_opt() and the fold in
+ * hpa_pool_opts_apply().  Adding an enumerator without the name would read off
+ * the end of the table; adding it without the fold would accept the option and
+ * silently ignore it, which is worse.  The table length is checked here; the
+ * other two are checked at the end of the fold.
+ */
+/* A negative array bound, for want of a static_assert idiom in this tree. */
+typedef char hpa_pool_opt_names_length_check[(sizeof(hpa_pool_opt_names)
+                                                     / sizeof(
+                                                         hpa_pool_opt_names[0])
+                                                 == hpa_pool_opt_limit)
+        ? 1
+        : -1];
+
 void
 hpa_pool_layout_identity(hpa_pool_layout_t *layout, unsigned narenas,
     unsigned nshards_max) {
@@ -218,12 +234,21 @@ hpa_pool_layout_set_opt(hpa_pool_layout_t *layout, size_t size_start,
 		err = hpa_pool_opt_parse_size(val, vallen, 0, 255,
 		    &pool->sec_opts.nshards);
 		break;
+	/*
+	 * The SEC bounds are not cosmetic: sec_init() asserts both, and a
+	 * value the global parser would have clipped becomes a debug-build
+	 * abort and a release-build misconfiguration if it arrives this way
+	 * instead.  Rejected rather than clipped, because a per-pool override
+	 * is a deliberate statement and silently adjusting it is worse than
+	 * refusing it.
+	 */
 	case hpa_pool_opt_sec_max_alloc:
-		err = hpa_pool_opt_parse_size(val, vallen, 0, SIZE_T_MAX,
-		    &pool->sec_opts.max_alloc);
+		err = hpa_pool_opt_parse_size(val, vallen, PAGE,
+		    USIZE_GROW_SLOW_THRESHOLD, &pool->sec_opts.max_alloc);
 		break;
 	case hpa_pool_opt_sec_max_bytes:
-		err = hpa_pool_opt_parse_size(val, vallen, 0, SIZE_T_MAX,
+		err = hpa_pool_opt_parse_size(val, vallen,
+		    SEC_OPTS_MAX_BYTES_DEFAULT, SIZE_T_MAX,
 		    &pool->sec_opts.max_bytes);
 		break;
 	default:
@@ -279,6 +304,31 @@ hpa_pool_opts_apply(hpa_shard_opts_t *opts, sec_opts_t *sec_opts,
 	APPLY(hpa_pool_opt_sec_max_bytes, sec_opts->max_bytes,
 	    entry->sec_opts.max_bytes)
 #undef APPLY
+
+	/*
+	 * Every bit the parser can set must have been consumed above.  An
+	 * enumerator added to hpa_pool_opt_t and to the parser but not to the
+	 * fold would otherwise be accepted from MALLOC_CONF and quietly do
+	 * nothing.
+	 */
+	assert((set & ~(((uint32_t)1 << hpa_pool_opt_limit) - 1)) == 0);
+#define APPLIED(which) | ((uint32_t)1 << (which))
+	static const uint32_t handled = 0 APPLIED(hpa_pool_opt_slab_max_alloc)
+	    APPLIED(hpa_pool_opt_hugification_threshold)
+	        APPLIED(hpa_pool_opt_dirty_mult)
+	            APPLIED(hpa_pool_opt_hugify_delay_ms)
+	                APPLIED(hpa_pool_opt_hugify_sync)
+	                    APPLIED(hpa_pool_opt_min_purge_interval_ms)
+	                        APPLIED(hpa_pool_opt_purge_threshold)
+	                            APPLIED(hpa_pool_opt_min_purge_delay_ms)
+	                                APPLIED(hpa_pool_opt_hugify_style)
+	                                    APPLIED(hpa_pool_opt_sec_nshards)
+	                                        APPLIED(hpa_pool_opt_sec_max_alloc)
+	                                            APPLIED(
+	                                                hpa_pool_opt_sec_max_bytes);
+#undef APPLIED
+	assert(handled == ((uint32_t)1 << hpa_pool_opt_limit) - 1);
+	assert((set & ~handled) == 0);
 }
 
 /*
@@ -744,6 +794,27 @@ hpa_pools_stats_merge(tsdn_t *tsdn, hpa_shard_stats_t *dst,
 			if (out == NULL) {
 				continue;
 			}
+
+			/*
+			 * Contention, from the same shards in the same pass.
+			 * Taken separately from the figures above because
+			 * hpa_shard_stats_merge() releases the mutexes before
+			 * returning, and reading a lock's profile while
+			 * holding it would count this read.
+			 */
+			malloc_mutex_lock(tsdn, &shard->grow_mtx);
+			malloc_mutex_prof_accum(tsdn,
+			    &out->mutexes[hpa_pool_mutex_shard_grow],
+			    &shard->grow_mtx);
+			malloc_mutex_unlock(tsdn, &shard->grow_mtx);
+
+			malloc_mutex_lock(tsdn, &shard->mtx);
+			malloc_mutex_prof_accum(tsdn,
+			    &out->mutexes[hpa_pool_mutex_shard], &shard->mtx);
+			malloc_mutex_unlock(tsdn, &shard->mtx);
+
+			sec_mutex_stats_read(tsdn, &shard->sec,
+			    &out->mutexes[hpa_pool_mutex_sec]);
 
 			/*
 			 * slabs[] is the huge/non-huge split; merged is the sum

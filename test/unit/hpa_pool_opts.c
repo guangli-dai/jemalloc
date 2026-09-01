@@ -257,9 +257,17 @@ TEST_BEGIN(test_singletons_do_not_thrash) {
 	expect_u64_le(hugifies, 4,
 	    "16 alloc/free cycles caused %" FMTu64 " hugifications; the "
 	    "pageslab is being rebuilt rather than reused", hugifies);
-	expect_u64_le(dehugifies, hugifies,
-	    "more dehugifications (%" FMTu64 ") than hugifications (%" FMTu64
-	    ")", dehugifies, hugifies);
+	expect_u64_eq(dehugifies, 0,
+	    "%" FMTu64 " dehugifications; the pageslab is being handed back "
+	    "and re-hugified rather than held", dehugifies);
+	/*
+	 * And the pageslab has to still be huge at the end.  Without this the
+	 * case passes trivially against an implementation that ignores the
+	 * per-pool overrides: nothing hugifies, so nothing thrashes.
+	 */
+	expect_zu_ge(shard->psset.stats.slabs[1].npageslabs, 1,
+	    "the band holds no hugified pageslab, so there was nothing that "
+	    "could have thrashed");
 }
 TEST_END
 

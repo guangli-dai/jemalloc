@@ -458,6 +458,11 @@ MUTEX_PROF_GLOBAL_MUTEXES
 MUTEX_PROF_ARENA_MUTEXES
 #undef OP
 
+/* Per HPA pool mutexes. */
+MUTEX_STATS_CTL_PROTO_GEN(hpa_pool_i_mutexes_hpa_shard)
+MUTEX_STATS_CTL_PROTO_GEN(hpa_pool_i_mutexes_hpa_shard_grow)
+MUTEX_STATS_CTL_PROTO_GEN(hpa_pool_i_mutexes_hpa_sec)
+
 /* Arena bin mutexes. */
 MUTEX_STATS_CTL_PROTO_GEN(arenas_i_bins_j_mutex)
 #undef MUTEX_STATS_CTL_PROTO_GEN
@@ -897,6 +902,16 @@ static const ctl_indexed_node_t stats_hpa_alloc_node[] = {
  * a pool's pageslabs actually went huge, which is what a per-pool
  * hugification threshold is tuned against.
  */
+MUTEX_PROF_DATA_NODE(hpa_pool_i_mutexes_hpa_shard)
+MUTEX_PROF_DATA_NODE(hpa_pool_i_mutexes_hpa_shard_grow)
+MUTEX_PROF_DATA_NODE(hpa_pool_i_mutexes_hpa_sec)
+
+static const ctl_named_node_t stats_hpa_pool_i_mutexes_node[] = {
+    {NAME("hpa_shard"), CHILD(named, stats_hpa_pool_i_mutexes_hpa_shard)},
+    {NAME("hpa_shard_grow"),
+        CHILD(named, stats_hpa_pool_i_mutexes_hpa_shard_grow)},
+    {NAME("hpa_sec"), CHILD(named, stats_hpa_pool_i_mutexes_hpa_sec)}};
+
 static const ctl_named_node_t stats_hpa_pool_i_node[] = {
     {NAME("npageslabs_nonhuge"), CTL(stats_hpa_pool_i_npageslabs_nonhuge)},
     {NAME("npageslabs_huge"), CTL(stats_hpa_pool_i_npageslabs_huge)},
@@ -908,7 +923,8 @@ static const ctl_named_node_t stats_hpa_pool_i_node[] = {
     {NAME("npurges"), CTL(stats_hpa_pool_i_npurges)},
     {NAME("nhugifies"), CTL(stats_hpa_pool_i_nhugifies)},
     {NAME("nhugify_failures"), CTL(stats_hpa_pool_i_nhugify_failures)},
-    {NAME("ndehugifies"), CTL(stats_hpa_pool_i_ndehugifies)}};
+    {NAME("ndehugifies"), CTL(stats_hpa_pool_i_ndehugifies)},
+    {NAME("mutexes"), CHILD(named, stats_hpa_pool_i_mutexes)}};
 
 static const ctl_named_node_t super_stats_hpa_pool_i_node[] = {
     {NAME(""), CHILD(named, stats_hpa_pool_i)}};
@@ -4096,6 +4112,15 @@ MUTEX_PROF_GLOBAL_MUTEXES
 	        ->astats->astats.mutex_prof_data[arena_prof_mutex_##mtx])
 MUTEX_PROF_ARENA_MUTEXES
 #undef OP
+
+/* Per HPA pool mutexes. */
+#define POOL_MUTEX(name, which)                                                \
+	RO_MUTEX_CTL_GEN(hpa_pool_i_mutexes_##name,                            \
+	    ctl_stats->hpapoolstats[mib[3]].mutexes[which])
+POOL_MUTEX(hpa_shard, hpa_pool_mutex_shard)
+POOL_MUTEX(hpa_shard_grow, hpa_pool_mutex_shard_grow)
+POOL_MUTEX(hpa_sec, hpa_pool_mutex_sec)
+#undef POOL_MUTEX
 
 /* tcache bin mutex */
 RO_MUTEX_CTL_GEN(

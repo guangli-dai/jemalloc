@@ -1075,7 +1075,8 @@ TEST_BEGIN(test_json_stats_hpa) {
 	const char *const hpa_pool_keys[] = {"size_min", "size_max", "nshards",
 	    "pick", "npageslabs_nonhuge", "npageslabs_huge", "nactive_nonhuge",
 	    "nactive_huge", "ndirty_nonhuge", "ndirty_huge", "npurge_passes",
-	    "npurges", "nhugifies", "nhugify_failures", "ndehugifies"};
+	    "npurges", "nhugifies", "nhugify_failures", "ndehugifies",
+	    "mutexes"};
 	for (unsigned i = 0; i < npools; i++) {
 		json_fragment_t pool;
 		expect_false(json_array_element(pools, i, &pool),
@@ -1084,6 +1085,19 @@ TEST_BEGIN(test_json_stats_hpa) {
 		malloc_snprintf(row_name, sizeof(row_name), "hpa.pool[%u]", i);
 		expect_json_object_keys(pool, hpa_pool_keys,
 		    ARRAY_COUNT(hpa_pool_keys), row_name);
+
+		/*
+		 * Contention for this band alone.  Named the same as the
+		 * process-wide sums so a reader can compare a band against the
+		 * whole without a translation table.
+		 */
+		json_fragment_t pool_mutexes;
+		expect_false(json_object_member(pool, "mutexes", &pool_mutexes),
+		    "%s is missing mutexes", row_name);
+		const char *const pool_mutex_names[]
+		    = {"hpa_shard", "hpa_shard_grow", "hpa_sec"};
+		expect_json_object_keys(pool_mutexes, pool_mutex_names,
+		    ARRAY_COUNT(pool_mutex_names), row_name);
 	}
 
 	const char *hpa_prefix = "stats.hpa";

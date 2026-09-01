@@ -1572,8 +1572,15 @@ stats_arena_hpa_shard_slabs_print(emitter_t *emitter) {
  * went huge -- so the bands are printed with their own occupancy and hugify
  * counters, plus the topology needed to read them.
  */
+/*
+ * In hpa_pool_mutex_t order, which is the order the per-pool figures are
+ * gathered in.
+ */
+static const char *const hpa_pool_mutex_names[]
+    = {"hpa_shard", "hpa_shard_grow", "hpa_sec"};
+
 static void
-stats_hpa_pools_print(emitter_t *emitter) {
+stats_hpa_pools_print(emitter_t *emitter, uint64_t uptime) {
 	unsigned npools;
 	CTL_GET("hpa.npools", &npools, unsigned);
 
@@ -1669,6 +1676,38 @@ stats_hpa_pools_print(emitter_t *emitter) {
 		    emitter_type_uint64, &nhugify_failures);
 		emitter_json_kv(emitter, "ndehugifies", emitter_type_uint64,
 		    &ndehugifies);
+
+		/*
+		 * Contention for this band alone.  The process-wide
+		 * stats.mutexes.hpa_* sums cannot separate a busy band from a
+		 * quiet one, and the tradeoff a band's boundaries make is
+		 * exactly packing against contention.
+		 */
+		if (config_stats) {
+			emitter_row_t mutex_row;
+			emitter_col_t col_name;
+			emitter_col_t col64[mutex_prof_num_uint64_t_counters];
+			emitter_col_t col32[mutex_prof_num_uint32_t_counters];
+			emitter_row_init(&mutex_row);
+			mutex_stats_init_cols(&mutex_row, "", &col_name, col64,
+			    col32);
+
+			size_t mutex_mib[CTL_MAX_DEPTH];
+			memcpy(mutex_mib, stat_mib, sizeof(mutex_mib));
+			CTL_LEAF_PREPARE(mutex_mib, 4, "mutexes");
+
+			emitter_json_object_kv_begin(emitter, "mutexes");
+			for (unsigned m = 0; m < hpa_pool_mutex_limit; m++) {
+				const char *mname = hpa_pool_mutex_names[m];
+				emitter_json_object_kv_begin(emitter, mname);
+				mutex_stats_read(mutex_mib, 5, mname, &col_name,
+				    col64, col32, uptime);
+				mutex_stats_emit(emitter, NULL, col64, col32);
+				emitter_json_object_end(emitter);
+			}
+			emitter_json_object_end(emitter); /* End "mutexes". */
+		}
+
 		emitter_json_object_end(emitter);
 
 		emitter_table_printf(emitter,
@@ -1689,7 +1728,7 @@ stats_hpa_pools_print(emitter_t *emitter) {
 static void
 stats_hpa_print(emitter_t *emitter, uint64_t uptime) {
 	emitter_json_object_kv_begin(emitter, "hpa");
-	stats_hpa_pools_print(emitter);
+	stats_hpa_pools_print(emitter, uptime);
 	stats_arena_hpa_shard_sec_print(emitter);
 	stats_arena_hpa_shard_counters_print(emitter, uptime);
 	stats_arena_hpa_shard_slabs_print(emitter);

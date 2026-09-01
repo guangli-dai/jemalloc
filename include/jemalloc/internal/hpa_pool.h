@@ -364,7 +364,27 @@ struct hpa_pool_stats_s {
 	uint64_t nhugifies;
 	uint64_t nhugify_failures;
 	uint64_t ndehugifies;
+
+	/*
+	 * Contention, per pool.  The whole tradeoff the bands exist to make is
+	 * packing against contention -- concentrating traffic into fewer,
+	 * larger pssets is what lets extents pair, and is also what makes them
+	 * contend -- so the sweep that picks band boundaries has to be able to
+	 * see both halves for the same band.  The process-wide
+	 * stats.mutexes.hpa_* sums cannot separate a busy band from a quiet
+	 * one.
+	 *
+	 * Indexed by hpa_pool_mutex_t.
+	 */
+	mutex_prof_data_t mutexes[3];
 };
+
+typedef enum hpa_pool_mutex_e {
+	hpa_pool_mutex_shard = 0,
+	hpa_pool_mutex_shard_grow = 1,
+	hpa_pool_mutex_sec = 2,
+	hpa_pool_mutex_limit = 3
+} hpa_pool_mutex_t;
 
 /*
  * Fills both views in one walk: the merged figures in dst, and the per-pool
