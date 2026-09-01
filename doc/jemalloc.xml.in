@@ -1106,6 +1106,173 @@ mallctl("arena." STRINGIFY(MALLCTL_ARENAS_ALL) ".decay",
         not within large size classes disables this feature.</para></listitem>
       </varlistentry>
 
+      <varlistentry id="opt.hpa">
+        <term>
+          <mallctl>opt.hpa</mallctl>
+          (<type>bool</type>)
+          <literal>r-</literal>
+        </term>
+        <listitem><para>Use the hugepage-aware page allocator (HPA) for
+        page-level allocations that fit within a hugepage, falling back to the
+        conventional page allocator for the rest.  The HPA packs allocations
+        into hugepage-sized slabs and advises the kernel to back a slab with a
+        hugepage once enough of it is in use.  The default is
+        false.</para>
+
+        <para>The HPA has a substantial number of tuning knobs beyond the ones
+        described below.  They are deliberately not documented here: they are
+        experimental, may be renamed or removed, and are described where they
+        are defined, in
+        <filename>include/jemalloc/internal/hpa_opts.h</filename>.</para>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry id="opt.hpa_shard_pools">
+        <term>
+          <mallctl>opt.hpa_shard_pools</mallctl>
+          (<type>bool</type>)
+          <literal>r-</literal>
+        </term>
+        <listitem><para>Route page-level allocations to HPA shards by the size
+        of the extent requested rather than by the arena the requesting thread
+        is bound to.  The HPA's shards are grouped into pools, each serving one
+        band of extent sizes; a pool is free to choose among its own shards on
+        every allocation, while a deallocation always returns the extent to the
+        shard that served it.</para>
+
+        <para>Segregating sizes this way is what allows extents of similar size
+        to share a hugepage, which is in turn what allows that hugepage to fill
+        up enough to be worth backing with one.  The cost is that a shard is no
+        longer associated with an arena: no
+        <link linkend="arena.i.purge"><mallctl>arena.&lt;i&gt;.*</mallctl></link>
+        operation affects HPA state, and
+        <link linkend="hpa.purge"><mallctl>hpa.purge</mallctl></link> is the
+        replacement.</para>
+
+        <para>The default is false, in which case
+        <link linkend="opt.hpa_pools"><mallctl>opt.hpa_pools</mallctl></link>
+        and
+        <link linkend="opt.hpa_pool_pick"><mallctl>opt.hpa_pool_pick</mallctl></link>
+        are ignored and a single pool spanning every size is built with one
+        shard per arena, chosen by arena index.</para></listitem>
+      </varlistentry>
+
+      <varlistentry id="opt.hpa_pools">
+        <term>
+          <mallctl>opt.hpa_pools</mallctl>
+          (<type>const char *</type>)
+          <literal>r-</literal>
+        </term>
+        <listitem><para>The size bands, written as
+        <literal>size_start-size_end:nshards</literal> separated by
+        <literal>|</literal>, in the same grammar as
+        <link linkend="opt.tcache_ncached_max"><mallctl>opt.tcache_ncached_max</mallctl></link>.
+        Sizes are <emphasis>extent</emphasis> sizes, not the sizes an
+        application requested, and the bands must tile the range from a page to
+        a hugepage exactly: the first must start at the page size, each must
+        begin one byte past the end of the last, and the last must end at the
+        hugepage size.  A gap is rejected rather than tolerated, because sizes
+        falling in one would quietly be served by the conventional page
+        allocator instead.</para>
+
+        <para>Routing granularity is the page-size class rather than the byte,
+        so a bound falling strictly inside a class has the effect of the end of
+        that class.</para>
+
+        <para>That extents rather than requests are what is routed has a
+        consequence worth stating plainly, because it silently defeats the
+        arrangement these bands are usually built for.  With <link
+        linkend="opt.cache_oblivious"><mallctl>opt.cache_oblivious</mallctl></link>
+        enabled, which is the default, a large allocation's extent is one page
+        larger than the size requested.  Two 1 MiB requests therefore need two
+        pages more than a 2 MiB hugepage and cannot share one, and each lands
+        in whichever band covers 1 MiB plus a page rather than the band chosen
+        for 1 MiB.  A layout whose boundaries were picked from request sizes
+        needs <link
+        linkend="opt.cache_oblivious"><mallctl>opt.cache_oblivious</mallctl></link>
+        disabled, or boundaries picked from padded sizes instead.</para>
+
+        <para>Ignored unless
+        <link linkend="opt.hpa_shard_pools"><mallctl>opt.hpa_shard_pools</mallctl></link>
+        is true.  For example,
+        <literal>hpa_pools:4096-65536:8|65537-2097152:2</literal>.</para>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry id="opt.hpa_pool_opts">
+        <term>
+          <mallctl>opt.hpa_pool_opts</mallctl>
+          (<type>const char *</type>)
+          <literal>r-</literal>
+        </term>
+        <listitem><para>Per-band overrides of the HPA tuning options, written as
+        <literal>size_start-size_end:key=value</literal> separated by
+        <literal>|</literal>.  A band is named by the size range it was given in
+        <link linkend="opt.hpa_pools"><mallctl>opt.hpa_pools</mallctl></link>,
+        which must therefore appear earlier in the configuration; a range that
+        names no band is an error.  Fields not named keep the process-wide
+        value, whichever order the two settings appear in.</para>
+
+        <para>Bands want different policy chiefly because the hugification
+        threshold is a fraction of a hugepage: a band of extents around half a
+        hugepage never reaches it on one extent and always does on two.  Note
+        that lowering the threshold alone is not sufficient to hugify a
+        half-used hugepage, because doing so makes its untouched pages
+        resident, which the dirty-page budget will refuse; such a band needs
+        <literal>dirty_mult</literal> raised as well.</para>
+
+        <para>The settable keys are <literal>slab_max_alloc</literal>,
+        <literal>hugification_threshold</literal>,
+        <literal>dirty_mult</literal>, <literal>hugify_delay_ms</literal>,
+        <literal>hugify_sync</literal>,
+        <literal>min_purge_interval_ms</literal>,
+        <literal>purge_threshold</literal>,
+        <literal>min_purge_delay_ms</literal>,
+        <literal>hugify_style</literal>, <literal>sec_nshards</literal>,
+        <literal>sec_max_alloc</literal> and
+        <literal>sec_max_bytes</literal>; each takes the same values as the
+        corresponding process-wide option.  They are experimental, in the same
+        sense and for the same reason as the options they override.</para>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry id="opt.hpa_pool_nshards_max">
+        <term>
+          <mallctl>opt.hpa_pool_nshards_max</mallctl>
+          (<type>size_t</type>)
+          <literal>r-</literal>
+        </term>
+        <listitem><para>Ceiling on the total number of HPA shards.  A
+        configuration asking for more is scaled down proportionally, with a
+        message, rather than refused.  The default is 64.</para>
+
+        <para>The ceiling exists because shards are built once at boot and
+        cannot know which arenas will ever be used, so sizing the default
+        layout at
+        <link linkend="opt.narenas"><mallctl>opt.narenas</mallctl></link> would
+        allocate metadata for hundreds of shards a process will never touch.
+        Above this many arenas, several share a shard.</para></listitem>
+      </varlistentry>
+
+      <varlistentry id="opt.hpa_pool_pick">
+        <term>
+          <mallctl>opt.hpa_pool_pick</mallctl>
+          (<type>const char *</type>)
+          <literal>r-</literal>
+        </term>
+        <listitem><para>How a pool chooses among its own shards.
+        <quote>arena</quote>, the default, uses the requesting arena's index,
+        which reproduces the association between an arena and a shard that
+        exists when
+        <link linkend="opt.hpa_shard_pools"><mallctl>opt.hpa_shard_pools</mallctl></link>
+        is off.  <quote>roundrobin</quote> spreads allocations across the
+        band's shards without reference to the caller.  Ignored unless
+        <link linkend="opt.hpa_shard_pools"><mallctl>opt.hpa_shard_pools</mallctl></link>
+        is true.  Reports what was configured rather than what is in use; see
+        <link linkend="hpa.pool.i.pick"><mallctl>hpa.pool.&lt;i&gt;.pick</mallctl></link>
+        for the latter.</para></listitem>
+      </varlistentry>
+
       <varlistentry id="opt.percpu_arena">
         <term>
           <mallctl>opt.percpu_arena</mallctl>
@@ -2047,6 +2214,18 @@ malloc_conf = "xmalloc:true";]]></programlisting>
         </term>
         <listitem><para>Purge all unused dirty pages for arena &lt;i&gt;, or for
         all arenas if &lt;i&gt; equals <constant>MALLCTL_ARENAS_ALL</constant>.
+        </para>
+
+        <para>This does not reach the hugepage-aware page allocator.  An HPA
+        shard serves every arena whose allocations route to it, so no arena can
+        speak for its memory; use <link
+        linkend="hpa.purge"><mallctl>hpa.purge</mallctl></link> instead.  The
+        same applies to <link
+        linkend="arena.i.reset"><mallctl>arena.&lt;i&gt;.reset</mallctl></link>,
+        <link
+        linkend="arena.i.destroy"><mallctl>arena.&lt;i&gt;.destroy</mallctl></link>
+        and <link
+        linkend="arena.i.extent_hooks"><mallctl>arena.&lt;i&gt;.extent_hooks</mallctl></link>.
         </para></listitem>
       </varlistentry>
 
@@ -2566,6 +2745,100 @@ struct extent_hooks_s {
         class.</para></listitem>
       </varlistentry>
 
+      <varlistentry id="hpa.purge">
+        <term>
+          <mallctl>hpa.purge</mallctl>
+          (<type>void</type>)
+          <literal>--</literal>
+        </term>
+        <listitem><para>Return as much memory as possible from the
+        hugepage-aware page allocator: flush every shard's small extent cache,
+        then force the purging and hugification work that would otherwise be
+        deferred.</para>
+
+        <para>Scoped to the HPA rather than to an arena because that is how the
+        resource is scoped.  A shard serves every arena whose allocations route
+        to it, so there is no per-arena share to release.</para></listitem>
+      </varlistentry>
+
+      <varlistentry id="hpa.npools">
+        <term>
+          <mallctl>hpa.npools</mallctl>
+          (<type>unsigned</type>)
+          <literal>r-</literal>
+        </term>
+        <listitem><para>Number of HPA pools built, which is zero if the HPA is
+        not in use.  This is what was built, as opposed to what was configured;
+        the two differ whenever <link
+        linkend="opt.hpa_shard_pools"><mallctl>opt.hpa_shard_pools</mallctl></link>
+        is false or the shard-count ceiling took effect.</para></listitem>
+      </varlistentry>
+
+      <varlistentry id="hpa.nshards">
+        <term>
+          <mallctl>hpa.nshards</mallctl>
+          (<type>unsigned</type>)
+          <literal>r-</literal>
+        </term>
+        <listitem><para>Total number of HPA shards built, across all
+        pools.</para></listitem>
+      </varlistentry>
+
+      <varlistentry id="hpa.pool.i.size_min">
+        <term>
+          <mallctl>hpa.pool.&lt;i&gt;.size_min</mallctl>
+          (<type>size_t</type>)
+          <literal>r-</literal>
+        </term>
+        <listitem><para>Smallest extent size pool &lt;i&gt; serves.</para>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry id="hpa.pool.i.size_max">
+        <term>
+          <mallctl>hpa.pool.&lt;i&gt;.size_max</mallctl>
+          (<type>size_t</type>)
+          <literal>r-</literal>
+        </term>
+        <listitem><para>Largest extent size pool &lt;i&gt; serves.</para>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry id="hpa.pool.i.nshards">
+        <term>
+          <mallctl>hpa.pool.&lt;i&gt;.nshards</mallctl>
+          (<type>unsigned</type>)
+          <literal>r-</literal>
+        </term>
+        <listitem><para>Number of shards pool &lt;i&gt; owns.</para>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry id="hpa.pool.i.first_shard">
+        <term>
+          <mallctl>hpa.pool.&lt;i&gt;.first_shard</mallctl>
+          (<type>unsigned</type>)
+          <literal>r-</literal>
+        </term>
+        <listitem><para>Index of the first shard pool &lt;i&gt; owns.  A pool's
+        shards are contiguous, so the pool owns
+        <literal>[first_shard, first_shard + nshards)</literal>.</para>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry id="hpa.pool.i.pick">
+        <term>
+          <mallctl>hpa.pool.&lt;i&gt;.pick</mallctl>
+          (<type>const char *</type>)
+          <literal>r-</literal>
+        </term>
+        <listitem><para>How pool &lt;i&gt; chooses among its shards.  Unlike
+        <link
+        linkend="opt.hpa_pool_pick"><mallctl>opt.hpa_pool_pick</mallctl></link>
+        this is the policy in use rather than the one configured.</para>
+        </listitem>
+      </varlistentry>
+
       <varlistentry id="arenas.create">
         <term>
           <mallctl>arenas.create</mallctl>
@@ -3008,6 +3281,46 @@ struct extent_hooks_s {
         counters</link>.</para></listitem>
       </varlistentry>
 
+      <varlistentry id="stats.mutexes.hpa_shard">
+        <term>
+          <mallctl>stats.mutexes.hpa_shard.{counter}</mallctl>
+	  (<type>counter specific type</type>) <literal>r-</literal>
+          [<option>--enable-stats</option>]
+        </term>
+        <listitem><para>Statistics on the hugepage-aware page allocator's shard
+        mutexes, summed over every shard in the process.  Global rather than
+        per arena because a shard is contended by every arena whose allocations
+        route to it.  <mallctl>{counter}</mallctl> is one of the counters in
+        <link linkend="mutex_counters">mutex profiling counters</link>.</para>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry id="stats.mutexes.hpa_shard_grow">
+        <term>
+          <mallctl>stats.mutexes.hpa_shard_grow.{counter}</mallctl>
+	  (<type>counter specific type</type>) <literal>r-</literal>
+          [<option>--enable-stats</option>]
+        </term>
+        <listitem><para>Statistics on the mutexes serialising hugepage
+        acquisition in the hugepage-aware page allocator, summed over every
+        shard.  <mallctl>{counter}</mallctl> is one of the counters in <link
+        linkend="mutex_counters">mutex profiling counters</link>.</para>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry id="stats.mutexes.hpa_sec">
+        <term>
+          <mallctl>stats.mutexes.hpa_sec.{counter}</mallctl>
+	  (<type>counter specific type</type>) <literal>r-</literal>
+          [<option>--enable-stats</option>]
+        </term>
+        <listitem><para>Statistics on the small extent cache bin mutexes in
+        front of the hugepage-aware page allocator, summed over every shard.
+        <mallctl>{counter}</mallctl> is one of the counters in <link
+        linkend="mutex_counters">mutex profiling counters</link>.</para>
+        </listitem>
+      </varlistentry>
+
       <varlistentry id="stats.mutexes.reset">
         <term>
           <mallctl>stats.mutexes.reset</mallctl>
@@ -3016,6 +3329,89 @@ struct extent_hooks_s {
         </term>
         <listitem><para>Reset all mutex profile statistics, including global
         mutexes, arena mutexes and bin mutexes.</para></listitem>
+      </varlistentry>
+
+      <varlistentry id="stats.hpa.pool.i.npageslabs_huge">
+        <term>
+          <mallctl>stats.hpa.pool.&lt;i&gt;.npageslabs_huge</mallctl>
+          (<type>size_t</type>)
+          <literal>r-</literal>
+          [<option>--enable-stats</option>]
+        </term>
+        <listitem><para>Number of hugepage-sized slabs held by pool &lt;i&gt;
+        that are backed by a hugepage.  The corresponding
+        <mallctl>npageslabs_nonhuge</mallctl> counts the rest.</para>
+
+        <para>Occupancy, which is the figure a band's size boundaries and
+        hugification threshold are tuned against, is
+        <mallctl>nactive_huge</mallctl> plus
+        <mallctl>nactive_nonhuge</mallctl> divided by the total slab count
+        times the number of pages in a hugepage.</para></listitem>
+      </varlistentry>
+
+      <varlistentry id="stats.hpa.pool.i.nactive_huge">
+        <term>
+          <mallctl>stats.hpa.pool.&lt;i&gt;.nactive_huge</mallctl>
+          (<type>size_t</type>)
+          <literal>r-</literal>
+          [<option>--enable-stats</option>]
+        </term>
+        <listitem><para>Pages in pool &lt;i&gt; that are in use and sit on a
+        hugepage-backed slab.  <mallctl>nactive_nonhuge</mallctl> counts the
+        rest.</para></listitem>
+      </varlistentry>
+
+      <varlistentry id="stats.hpa.pool.i.ndirty_huge">
+        <term>
+          <mallctl>stats.hpa.pool.&lt;i&gt;.ndirty_huge</mallctl>
+          (<type>size_t</type>)
+          <literal>r-</literal>
+          [<option>--enable-stats</option>]
+        </term>
+        <listitem><para>Pages in pool &lt;i&gt; that have been touched but are
+        no longer in use, on hugepage-backed slabs.
+        <mallctl>ndirty_nonhuge</mallctl> counts the rest.</para></listitem>
+      </varlistentry>
+
+      <varlistentry id="stats.hpa.pool.i.nhugifies">
+        <term>
+          <mallctl>stats.hpa.pool.&lt;i&gt;.nhugifies</mallctl>
+          (<type>uint64_t</type>)
+          <literal>r-</literal>
+          [<option>--enable-stats</option>]
+        </term>
+        <listitem><para>Slabs in pool &lt;i&gt; that have been backed by a
+        hugepage.  <mallctl>ndehugifies</mallctl> counts those that stopped
+        being, and <mallctl>nhugify_failures</mallctl> those the kernel
+        declined; <mallctl>npurges</mallctl> and
+        <mallctl>npurge_passes</mallctl> report purging over the same
+        band.</para>
+
+        <para>A band whose hugify and dehugify counts advance together is
+        thrashing rather than settling, which is the failure mode of a
+        hugification threshold set too low for the traffic the band
+        sees.</para></listitem>
+      </varlistentry>
+
+      <varlistentry id="stats.hpa.pool.i.mutexes.hpa_shard">
+        <term>
+          <mallctl>stats.hpa.pool.&lt;i&gt;.mutexes.hpa_shard.{counter}</mallctl>
+	  (<type>counter specific type</type>) <literal>r-</literal>
+          [<option>--enable-stats</option>]
+        </term>
+        <listitem><para>Contention on pool &lt;i&gt;'s shard mutexes, summed
+        over that pool's shards only; <mallctl>hpa_shard_grow</mallctl> and
+        <mallctl>hpa_sec</mallctl> are the same for the other two locks.  The
+        counters are those in <link linkend="mutex_counters">mutex profiling
+        counters</link>, and are named to match the process-wide sums at <link
+        linkend="stats.mutexes.hpa_shard"><mallctl>stats.mutexes.hpa_shard</mallctl></link>.
+        </para>
+
+        <para>Reported per pool because the tradeoff a band's boundaries make
+        is packing against contention: routing more traffic to fewer, larger
+        slabs is what lets extents share a hugepage, and is also what makes
+        them contend.  The process-wide sums cannot separate a busy band from a
+        quiet one.</para></listitem>
       </varlistentry>
 
       <varlistentry id="stats.arenas.i.dss">
