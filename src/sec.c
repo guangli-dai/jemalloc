@@ -488,6 +488,25 @@ sec_mutex_stats_read(
 	}
 }
 
+/*
+ * stats.mutexes.reset has to reach these too.  Without it the SEC line keeps
+ * pre-reset counts while every other lock restarts from zero, which reads as
+ * the SEC being the contention point.
+ */
+void
+sec_mutex_prof_reset(tsdn_t *tsdn, sec_t *sec) {
+	if (!sec_is_used(sec)) {
+		return;
+	}
+	size_t ntotal_bins = sec->opts.nshards * sec->npsizes;
+	for (pszind_t i = 0; i < ntotal_bins; i++) {
+		sec_bin_t *bin = &sec->bins[i];
+		malloc_mutex_lock(tsdn, &bin->mtx);
+		malloc_mutex_prof_data_reset(tsdn, &bin->mtx);
+		malloc_mutex_unlock(tsdn, &bin->mtx);
+	}
+}
+
 void
 sec_prefork2(tsdn_t *tsdn, sec_t *sec) {
 	if (!sec_is_used(sec)) {

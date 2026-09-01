@@ -1049,13 +1049,42 @@ TEST_BEGIN(test_json_stats_hpa) {
 	json_fragment_t hpa;
 	expect_false(json_object_member(stats, "hpa", &hpa),
 	    "runtime stats are missing hpa");
-	const char *const hpa_keys[] = {"sec_bytes", "sec_hits", "sec_misses",
-	    "sec_dalloc_noflush", "sec_dalloc_flush", "sec_overfills",
-	    "npageslabs", "nactive", "ndirty", "npurge_passes", "npurges",
-	    "nhugifies", "nhugify_failures", "ndehugifies", "slabs",
+	const char *const hpa_keys[] = {"pool", "sec_bytes", "sec_hits",
+	    "sec_misses", "sec_dalloc_noflush", "sec_dalloc_flush",
+	    "sec_overfills", "npageslabs", "nactive", "ndirty", "npurge_passes",
+	    "npurges", "nhugifies", "nhugify_failures", "ndehugifies", "slabs",
 	    "extent_allocation_distribution", "full_slabs", "empty_slabs",
 	    "nonfull_slabs"};
 	expect_json_object_keys(hpa, hpa_keys, ARRAY_COUNT(hpa_keys), "hpa");
+
+	/*
+	 * One row per pool, each carrying its band and the counters a tuning
+	 * sweep reads.  The row count has to match hpa.npools -- a schema that
+	 * silently tolerated a missing pool would hide exactly the
+	 * misconfiguration these nodes exist to expose.
+	 */
+	json_fragment_t pools;
+	expect_false(json_object_member(hpa, "pool", &pools),
+	    "hpa is missing pool");
+	unsigned npools;
+	size_t   npsz = sizeof(npools);
+	expect_d_eq(mallctl("hpa.npools", &npools, &npsz, NULL, 0), 0,
+	    "hpa.npools should be readable");
+	expect_zu_eq(json_array_size(pools), npools,
+	    "hpa.pool has an unexpected number of rows");
+	const char *const hpa_pool_keys[] = {"size_min", "size_max", "nshards",
+	    "pick", "npageslabs_nonhuge", "npageslabs_huge", "nactive_nonhuge",
+	    "nactive_huge", "ndirty_nonhuge", "ndirty_huge", "npurge_passes",
+	    "npurges", "nhugifies", "nhugify_failures", "ndehugifies"};
+	for (unsigned i = 0; i < npools; i++) {
+		json_fragment_t pool;
+		expect_false(json_array_element(pools, i, &pool),
+		    "hpa.pool is missing row %u", i);
+		char row_name[64];
+		malloc_snprintf(row_name, sizeof(row_name), "hpa.pool[%u]", i);
+		expect_json_object_keys(pool, hpa_pool_keys,
+		    ARRAY_COUNT(hpa_pool_keys), row_name);
+	}
 
 	const char *hpa_prefix = "stats.hpa";
 	expect_json_ctl_fields(hpa, hpa_prefix, hpa_sec_fields,

@@ -248,6 +248,7 @@ TESTS_UNIT := \
 	$(srcroot)test/unit/hpa_central.c \
 	$(srcroot)test/unit/hpa_pool.c \
 	$(srcroot)test/unit/hpa_pool_reroute.c \
+	$(srcroot)test/unit/hpa_pool_opts.c \
 	$(srcroot)test/unit/hpa_sec_integration.c \
 	$(srcroot)test/unit/hpa_thp_always.c \
 	$(srcroot)test/unit/hpa_vectorized_madvise.c \

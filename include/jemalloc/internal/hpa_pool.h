@@ -143,20 +143,67 @@ struct hpa_pool_s {
 };
 
 /*
+ * Per-pool option overrides.
+ *
+ * Distinct size bands want distinct policy -- that is most of the point of
+ * having bands.  The load-bearing case is hugification: the global threshold is
+ * 95% of a hugepage, so a pool of ~1 MiB extents never hugifies on one extent
+ * and always does on two.  Without a threshold of its own, such a pool produces
+ * permanently non-huge, half-used hugepages, which is the outcome the whole
+ * exercise exists to avoid.
+ *
+ * Overrides are recorded as (value, "was it set") rather than as absolute
+ * values, because MALLOC_CONF is order-independent: the global default a pool
+ * inherits may be parsed after the override that refines it.  The set bits say
+ * which fields to apply on top of whatever the globals ended up being.
+ */
+typedef enum hpa_pool_opt_e {
+	hpa_pool_opt_slab_max_alloc,
+	hpa_pool_opt_hugification_threshold,
+	hpa_pool_opt_dirty_mult,
+	hpa_pool_opt_hugify_delay_ms,
+	hpa_pool_opt_hugify_sync,
+	hpa_pool_opt_min_purge_interval_ms,
+	hpa_pool_opt_purge_threshold,
+	hpa_pool_opt_min_purge_delay_ms,
+	hpa_pool_opt_hugify_style,
+	hpa_pool_opt_sec_nshards,
+	hpa_pool_opt_sec_max_alloc,
+	hpa_pool_opt_sec_max_bytes,
+	hpa_pool_opt_limit
+} hpa_pool_opt_t;
+
+/* Names as they appear in MALLOC_CONF, indexed by hpa_pool_opt_t. */
+extern const char *const hpa_pool_opt_names[];
+
+typedef struct hpa_pool_layout_entry_s hpa_pool_layout_entry_t;
+struct hpa_pool_layout_entry_s {
+	/*
+	 * Upper bound of this pool's band; the lower bound is implied by the
+	 * previous pool.  The last pool must reach HUGEPAGE.
+	 */
+	size_t   size_max;
+	unsigned nshards;
+
+	/*
+	 * Only the fields named in opts_set are meaningful; the rest are
+	 * filled from the process-wide defaults when the pool is built.
+	 */
+	hpa_shard_opts_t opts;
+	sec_opts_t       sec_opts;
+	uint32_t         opts_set;
+};
+
+/*
  * What layout to build.  Kept separate from the pool set itself so that the
  * configuration parser can fill one in without knowing anything about how
  * pools are constructed, and so that tests can build layouts directly.
  */
 typedef struct hpa_pool_layout_s hpa_pool_layout_t;
 struct hpa_pool_layout_s {
-	unsigned npools;
-	struct {
-		/* Upper bound of this pool's band; the lower bound is implied
-		 * by the previous pool.  The last pool must reach HUGEPAGE. */
-		size_t   size_max;
-		unsigned nshards;
-	} pools[HPA_MAX_POOLS];
-	hpa_pool_pick_t pick;
+	unsigned                npools;
+	hpa_pool_layout_entry_t pools[HPA_MAX_POOLS];
+	hpa_pool_pick_t         pick;
 
 	/*
 	 * Ceiling on the sum of the nshards above.  A layout asking for more is
@@ -289,8 +336,44 @@ uint64_t hpa_pools_time_until_deferred_work(tsdn_t *tsdn);
  * contribution entirely would silently under-report memory, and re-reading it
  * unlocked would let resident disagree with the HPA stats beside it.
  */
-void hpa_pools_stats_merge(tsdn_t *tsdn, hpa_shard_stats_t *dst);
 void hpa_pools_flush(tsdn_t *tsdn);
+
+/*
+ * Per-pool figures, which the merged view above cannot answer.
+ *
+ * Per-pool options are only tunable if they are also measurable: the point of
+ * giving a 1 MiB band its own hugification threshold is that its pageslabs
+ * reach full occupancy and hugify, and the merged number cannot say whether
+ * they did.  Occupancy is nactive / (npageslabs * HUGEPAGE_PAGES), which is why
+ * both halves are here alongside the hugify counters.
+ *
+ * A compact subset rather than the whole psset breakdown: this is what the
+ * tuning sweep reads, and duplicating forty-odd nodes per pool would cost more
+ * to maintain than it answers.
+ */
+typedef struct hpa_pool_stats_s hpa_pool_stats_t;
+struct hpa_pool_stats_s {
+	size_t   npageslabs_huge;
+	size_t   npageslabs_nonhuge;
+	size_t   nactive_huge;
+	size_t   nactive_nonhuge;
+	size_t   ndirty_huge;
+	size_t   ndirty_nonhuge;
+	uint64_t npurge_passes;
+	uint64_t npurges;
+	uint64_t nhugifies;
+	uint64_t nhugify_failures;
+	uint64_t ndehugifies;
+};
+
+/*
+ * Fills both views in one walk: the merged figures in dst, and the per-pool
+ * ones in pool_dst[0 .. min(npools, live pools)).  pool_dst may be NULL.
+ * Together, because each shard's stats are read under its mutex and two walks
+ * would sample at two instants.
+ */
+void hpa_pools_stats_merge(tsdn_t *tsdn, hpa_shard_stats_t *dst,
+    hpa_pool_stats_t *pool_dst, unsigned npools);
 
 /*
  * Mutex contention, likewise process-wide.  stats.mutexes.hpa_* sums every
@@ -317,6 +400,20 @@ void hpa_pools_purge(tsdn_t *tsdn);
 void hpa_pool_layout_init(hpa_pool_layout_t *layout);
 bool hpa_pool_layout_add(hpa_pool_layout_t *layout, size_t size_start,
     size_t size_end, unsigned nshards);
+
+/*
+ * Record one per-pool override, addressed by the band's size range rather than
+ * by its position in the list.  A range that does not name a configured band
+ * exactly is an error rather than a no-op: a silently ignored override reads as
+ * "I tuned that and it did not help".
+ *
+ * Returns true on error, having complained.  The key and value are the text
+ * from MALLOC_CONF; parsing lives here so that the range-to-pool lookup, the
+ * name table and the field it fills stay in one place.
+ */
+bool hpa_pool_layout_set_opt(hpa_pool_layout_t *layout, size_t size_start,
+    size_t size_end, const char *key, size_t keylen, const char *val,
+    size_t vallen);
 
 /*
  * The identity layout: one pool spanning everything, one shard per arena,

@@ -1567,6 +1567,121 @@ stats_arena_hpa_shard_slabs_print(emitter_t *emitter) {
 }
 
 /*
+ * The per-pool breakdown.  The merged figures below cannot answer the question
+ * pools exist to raise -- whether a given size band's pageslabs filled up and
+ * went huge -- so the bands are printed with their own occupancy and hugify
+ * counters, plus the topology needed to read them.
+ */
+static void
+stats_hpa_pools_print(emitter_t *emitter) {
+	unsigned npools;
+	CTL_GET("hpa.npools", &npools, unsigned);
+
+	/*
+	 * The array is emitted even when empty, so that a consumer can tell
+	 * "no pools" from "this build does not report pools" without special
+	 * casing.  The table header is not: an empty table is noise.
+	 */
+	emitter_json_array_kv_begin(emitter, "pool");
+	if (npools == 0) {
+		emitter_json_array_end(emitter);
+		return;
+	}
+	emitter_table_printf(emitter,
+	    "HPA pools:\n"
+	    "  pool         sizes  shards  pick        pageslabs   "
+	    "active      dirty  hugified\n");
+
+	size_t topo_mib[CTL_MAX_DEPTH];
+	size_t stat_mib[CTL_MAX_DEPTH];
+	CTL_LEAF_PREPARE(topo_mib, 0, "hpa.pool");
+	CTL_LEAF_PREPARE(stat_mib, 0, "stats.hpa.pool");
+
+	for (unsigned i = 0; i < npools; i++) {
+		topo_mib[2] = i;
+		stat_mib[3] = i;
+
+		size_t      size_min, size_max;
+		unsigned    nshards;
+		const char *pick;
+		CTL_LEAF(topo_mib, 3, "size_min", &size_min, size_t);
+		CTL_LEAF(topo_mib, 3, "size_max", &size_max, size_t);
+		CTL_LEAF(topo_mib, 3, "nshards", &nshards, unsigned);
+		CTL_LEAF(topo_mib, 3, "pick", &pick, const char *);
+
+		size_t   ps_nonhuge = 0, ps_huge = 0;
+		size_t   act_nonhuge = 0, act_huge = 0;
+		size_t   dirty_nonhuge = 0, dirty_huge = 0;
+		uint64_t nhugifies = 0, ndehugifies = 0;
+		uint64_t npurges = 0, npurge_passes = 0;
+		uint64_t nhugify_failures = 0;
+		if (config_stats) {
+			CTL_LEAF(stat_mib, 4, "npageslabs_nonhuge",
+			    &ps_nonhuge, size_t);
+			CTL_LEAF(stat_mib, 4, "npageslabs_huge", &ps_huge,
+			    size_t);
+			CTL_LEAF(stat_mib, 4, "nactive_nonhuge", &act_nonhuge,
+			    size_t);
+			CTL_LEAF(stat_mib, 4, "nactive_huge", &act_huge,
+			    size_t);
+			CTL_LEAF(stat_mib, 4, "ndirty_nonhuge", &dirty_nonhuge,
+			    size_t);
+			CTL_LEAF(stat_mib, 4, "ndirty_huge", &dirty_huge,
+			    size_t);
+			CTL_LEAF(stat_mib, 4, "nhugifies", &nhugifies,
+			    uint64_t);
+			CTL_LEAF(stat_mib, 4, "ndehugifies", &ndehugifies,
+			    uint64_t);
+			CTL_LEAF(stat_mib, 4, "nhugify_failures",
+			    &nhugify_failures, uint64_t);
+			CTL_LEAF(stat_mib, 4, "npurges", &npurges, uint64_t);
+			CTL_LEAF(stat_mib, 4, "npurge_passes", &npurge_passes,
+			    uint64_t);
+		}
+
+		emitter_json_object_begin(emitter);
+		emitter_json_kv(emitter, "size_min", emitter_type_size,
+		    &size_min);
+		emitter_json_kv(emitter, "size_max", emitter_type_size,
+		    &size_max);
+		emitter_json_kv(emitter, "nshards", emitter_type_unsigned,
+		    &nshards);
+		emitter_json_kv(emitter, "pick", emitter_type_string, &pick);
+		emitter_json_kv(emitter, "npageslabs_nonhuge",
+		    emitter_type_size, &ps_nonhuge);
+		emitter_json_kv(emitter, "npageslabs_huge", emitter_type_size,
+		    &ps_huge);
+		emitter_json_kv(emitter, "nactive_nonhuge", emitter_type_size,
+		    &act_nonhuge);
+		emitter_json_kv(emitter, "nactive_huge", emitter_type_size,
+		    &act_huge);
+		emitter_json_kv(emitter, "ndirty_nonhuge", emitter_type_size,
+		    &dirty_nonhuge);
+		emitter_json_kv(emitter, "ndirty_huge", emitter_type_size,
+		    &dirty_huge);
+		emitter_json_kv(emitter, "npurge_passes", emitter_type_uint64,
+		    &npurge_passes);
+		emitter_json_kv(emitter, "npurges", emitter_type_uint64,
+		    &npurges);
+		emitter_json_kv(emitter, "nhugifies", emitter_type_uint64,
+		    &nhugifies);
+		emitter_json_kv(emitter, "nhugify_failures",
+		    emitter_type_uint64, &nhugify_failures);
+		emitter_json_kv(emitter, "ndehugifies", emitter_type_uint64,
+		    &ndehugifies);
+		emitter_json_object_end(emitter);
+
+		emitter_table_printf(emitter,
+		    "  %4u  %6zu-%6zu  %6u  %-10s  %9zu  %9zu  %9zu  %8" FMTu64
+		    "\n",
+		    i, size_min, size_max, nshards, pick,
+		    ps_nonhuge + ps_huge, act_nonhuge + act_huge,
+		    dirty_nonhuge + dirty_huge, nhugifies);
+	}
+	emitter_json_array_end(emitter); /* End "pool" */
+}
+
+/*
  * Process-wide, not per arena: an HPA shard serves every arena that routes to
  * its pool, so there is no per-arena figure to print.  Emitted once, under
  * "hpa", by stats_print_helper().
@@ -1574,6 +1689,7 @@ stats_arena_hpa_shard_slabs_print(emitter_t *emitter) {
 static void
 stats_hpa_print(emitter_t *emitter, uint64_t uptime) {
 	emitter_json_object_kv_begin(emitter, "hpa");
+	stats_hpa_pools_print(emitter);
 	stats_arena_hpa_shard_sec_print(emitter);
 	stats_arena_hpa_shard_counters_print(emitter, uptime);
 	stats_arena_hpa_shard_slabs_print(emitter);
@@ -2135,6 +2251,9 @@ stats_general_opts(emitter_t *emitter) {
 	OPT_WRITE_SIZE_T("hpa_sec_nshards")
 	OPT_WRITE_SIZE_T("hpa_sec_max_alloc")
 	OPT_WRITE_SIZE_T("hpa_sec_max_bytes")
+	OPT_WRITE_BOOL("hpa_shard_pools")
+	OPT_WRITE_SIZE_T("hpa_pool_nshards_max")
+	OPT_WRITE_CHAR_P("hpa_pool_pick")
 	OPT_WRITE_SIZE_T("experimental_pac_sec_nshards")
 	OPT_WRITE_SIZE_T("experimental_pac_sec_max_alloc")
 	OPT_WRITE_SIZE_T("experimental_pac_sec_max_bytes")

@@ -217,6 +217,12 @@ CTL_PROTO(arena_i_decay)
 CTL_PROTO(arena_i_purge)
 CTL_PROTO(hpa_purge)
 CTL_PROTO(hpa_npools)
+CTL_PROTO(hpa_pool_i_size_min)
+CTL_PROTO(hpa_pool_i_size_max)
+CTL_PROTO(hpa_pool_i_nshards)
+CTL_PROTO(hpa_pool_i_first_shard)
+CTL_PROTO(hpa_pool_i_pick)
+INDEX_PROTO(hpa_pool_i)
 CTL_PROTO(hpa_nshards)
 CTL_PROTO(arena_i_reset)
 CTL_PROTO(arena_i_destroy)
@@ -302,6 +308,18 @@ CTL_PROTO(stats_arenas_i_extents_j_pinned_bytes)
 INDEX_PROTO(stats_arenas_i_extents_j)
 
 /* Merged set of stats for HPA shard. */
+CTL_PROTO(stats_hpa_pool_i_npageslabs_nonhuge)
+CTL_PROTO(stats_hpa_pool_i_npageslabs_huge)
+CTL_PROTO(stats_hpa_pool_i_nactive_nonhuge)
+CTL_PROTO(stats_hpa_pool_i_nactive_huge)
+CTL_PROTO(stats_hpa_pool_i_ndirty_nonhuge)
+CTL_PROTO(stats_hpa_pool_i_ndirty_huge)
+CTL_PROTO(stats_hpa_pool_i_npurge_passes)
+CTL_PROTO(stats_hpa_pool_i_npurges)
+CTL_PROTO(stats_hpa_pool_i_nhugifies)
+CTL_PROTO(stats_hpa_pool_i_nhugify_failures)
+CTL_PROTO(stats_hpa_pool_i_ndehugifies)
+INDEX_PROTO(stats_hpa_pool_i)
 CTL_PROTO(stats_hpa_npageslabs)
 CTL_PROTO(stats_hpa_nactive)
 CTL_PROTO(stats_hpa_ndirty)
@@ -639,8 +657,26 @@ static const ctl_indexed_node_t arenas_lextent_node[] = {
  * child: an HPA shard serves every arena that routes to its pool, so no arena
  * can act on one, and arena.<i>.* no longer tries to.
  */
+/*
+ * The topology as built, per pool.  Not under stats.*: which sizes go where is
+ * a fact about the configuration, readable whether or not stats are compiled
+ * in, and it is the thing a misconfigured layout gets wrong.
+ */
+static const ctl_named_node_t hpa_pool_i_node[] = {
+    {NAME("size_min"), CTL(hpa_pool_i_size_min)},
+    {NAME("size_max"), CTL(hpa_pool_i_size_max)},
+    {NAME("nshards"), CTL(hpa_pool_i_nshards)},
+    {NAME("first_shard"), CTL(hpa_pool_i_first_shard)},
+    {NAME("pick"), CTL(hpa_pool_i_pick)}};
+
+static const ctl_named_node_t super_hpa_pool_i_node[] = {
+    {NAME(""), CHILD(named, hpa_pool_i)}};
+
+static const ctl_indexed_node_t hpa_pool_node[] = {{INDEX(hpa_pool_i)}};
+
 static const ctl_named_node_t hpa_node[] = {{NAME("purge"), CTL(hpa_purge)},
-    {NAME("npools"), CTL(hpa_npools)}, {NAME("nshards"), CTL(hpa_nshards)}};
+    {NAME("npools"), CTL(hpa_npools)}, {NAME("nshards"), CTL(hpa_nshards)},
+    {NAME("pool"), CHILD(indexed, hpa_pool)}};
 
 static const ctl_named_node_t arenas_node[] = {
     {NAME("narenas"), CTL(arenas_narenas)},
@@ -855,7 +891,33 @@ static const ctl_named_node_t super_stats_hpa_alloc_j_node[] = {
 static const ctl_indexed_node_t stats_hpa_alloc_node[] = {
     {INDEX(stats_hpa_alloc_j)}};
 
+/*
+ * Per-pool counters.  A compact subset of the merged view: enough to compute
+ * occupancy (nactive over npageslabs * pages-per-hugepage) and to see whether
+ * a pool's pageslabs actually went huge, which is what a per-pool
+ * hugification threshold is tuned against.
+ */
+static const ctl_named_node_t stats_hpa_pool_i_node[] = {
+    {NAME("npageslabs_nonhuge"), CTL(stats_hpa_pool_i_npageslabs_nonhuge)},
+    {NAME("npageslabs_huge"), CTL(stats_hpa_pool_i_npageslabs_huge)},
+    {NAME("nactive_nonhuge"), CTL(stats_hpa_pool_i_nactive_nonhuge)},
+    {NAME("nactive_huge"), CTL(stats_hpa_pool_i_nactive_huge)},
+    {NAME("ndirty_nonhuge"), CTL(stats_hpa_pool_i_ndirty_nonhuge)},
+    {NAME("ndirty_huge"), CTL(stats_hpa_pool_i_ndirty_huge)},
+    {NAME("npurge_passes"), CTL(stats_hpa_pool_i_npurge_passes)},
+    {NAME("npurges"), CTL(stats_hpa_pool_i_npurges)},
+    {NAME("nhugifies"), CTL(stats_hpa_pool_i_nhugifies)},
+    {NAME("nhugify_failures"), CTL(stats_hpa_pool_i_nhugify_failures)},
+    {NAME("ndehugifies"), CTL(stats_hpa_pool_i_ndehugifies)}};
+
+static const ctl_named_node_t super_stats_hpa_pool_i_node[] = {
+    {NAME(""), CHILD(named, stats_hpa_pool_i)}};
+
+static const ctl_indexed_node_t stats_hpa_pool_node[] = {
+    {INDEX(stats_hpa_pool_i)}};
+
 static const ctl_named_node_t stats_hpa_node[] = {
+    {NAME("pool"), CHILD(indexed, stats_hpa_pool)},
     {NAME("npageslabs"), CTL(stats_hpa_npageslabs)},
     {NAME("nactive"), CTL(stats_hpa_nactive)},
     {NAME("ndirty"), CTL(stats_hpa_ndirty)},
@@ -1489,7 +1551,8 @@ ctl_refresh(tsdn_t *tsdn) {
 		 * stats.hpa.psset_stats.merged.ndirty from the same refresh.
 		 */
 		memset(&ctl_stats->hpastats, 0, sizeof(ctl_stats->hpastats));
-		hpa_pools_stats_merge(tsdn, &ctl_stats->hpastats);
+		hpa_pools_stats_merge(tsdn, &ctl_stats->hpastats,
+		    ctl_stats->hpapoolstats, HPA_MAX_POOLS);
 		size_t hpa_ndirty
 		    = ctl_stats->hpastats.psset_stats.merged.ndirty;
 		ctl_sarena->astats->astats.resident += (hpa_ndirty << LG_PAGE);
@@ -2896,6 +2959,29 @@ hpa_purge_ctl(tsd_t *tsd, const size_t *mib, size_t miblen, void *oldp,
 CTL_RO_NL_GEN(hpa_npools, hpa_pools_global.npools, unsigned)
 CTL_RO_NL_GEN(hpa_nshards, hpa_pools_global.nshards_total, unsigned)
 
+CTL_RO_NL_GEN(
+    hpa_pool_i_size_min, hpa_pools_global.pools[mib[2]].size_min, size_t)
+CTL_RO_NL_GEN(
+    hpa_pool_i_size_max, hpa_pools_global.pools[mib[2]].size_max, size_t)
+CTL_RO_NL_GEN(
+    hpa_pool_i_nshards, hpa_pools_global.pools[mib[2]].nshards, unsigned)
+CTL_RO_NL_GEN(hpa_pool_i_first_shard,
+    hpa_pools_global.pools[mib[2]].first_shard, unsigned)
+/*
+ * The picker actually in use, which opt.hpa_pool_pick does not report: with
+ * hpa_shard_pools off, the configured picker is ignored and this says so.
+ */
+CTL_RO_NL_GEN(hpa_pool_i_pick,
+    hpa_pool_pick_names[hpa_pools_global.pools[mib[2]].pick], const char *)
+
+static const ctl_named_node_t *
+hpa_pool_i_index(tsdn_t *tsdn, const size_t *mib, size_t miblen, size_t i) {
+	if (i >= hpa_pools_global.npools) {
+		return NULL;
+	}
+	return super_hpa_pool_i_node;
+}
+
 static int
 arena_i_reset_ctl(tsd_t *tsd, const size_t *mib, size_t miblen, void *oldp,
     size_t *oldlenp, void *newp, size_t newlen) {
@@ -4062,6 +4148,13 @@ stats_mutexes_reset_ctl(tsd_t *tsd, const size_t *mib, size_t miblen,
 		MUTEX_PROF_RESET(arena->pa_shard.pac.ecache_pinned.mtx);
 		MUTEX_PROF_RESET(arena->pa_shard.pac.decay_dirty.mtx);
 		MUTEX_PROF_RESET(arena->pa_shard.pac.decay_muzzy.mtx);
+		/*
+		 * The PAC's SEC bins, which the loop above never reached --
+		 * the same gap the HPA side had, fixed here for the same
+		 * reason: a lock whose counters survive a reset reads as the
+		 * contention point afterwards.
+		 */
+		sec_mutex_prof_reset(tsdn, &arena->pa_shard.pac.sec);
 		MUTEX_PROF_RESET(arena->cache_bin_array_descriptor_ql_mtx);
 		MUTEX_PROF_RESET(arena->base->mtx);
 
@@ -4164,6 +4257,31 @@ CTL_RO_CGEN(config_stats, stats_hpa_ndirty,
     ctl_stats->hpastats.psset_stats.merged.ndirty, size_t)
 
 /* Nonhuge slabs */
+#define POOL_STAT(n, t)                                                        \
+	CTL_RO_CGEN(config_stats, stats_hpa_pool_i_##n,                        \
+	    ctl_stats->hpapoolstats[mib[3]].n, t)
+POOL_STAT(npageslabs_nonhuge, size_t)
+POOL_STAT(npageslabs_huge, size_t)
+POOL_STAT(nactive_nonhuge, size_t)
+POOL_STAT(nactive_huge, size_t)
+POOL_STAT(ndirty_nonhuge, size_t)
+POOL_STAT(ndirty_huge, size_t)
+POOL_STAT(npurge_passes, uint64_t)
+POOL_STAT(npurges, uint64_t)
+POOL_STAT(nhugifies, uint64_t)
+POOL_STAT(nhugify_failures, uint64_t)
+POOL_STAT(ndehugifies, uint64_t)
+#undef POOL_STAT
+
+static const ctl_named_node_t *
+stats_hpa_pool_i_index(
+    tsdn_t *tsdn, const size_t *mib, size_t miblen, size_t i) {
+	if (i >= hpa_pools_global.npools) {
+		return NULL;
+	}
+	return super_stats_hpa_pool_i_node;
+}
+
 CTL_RO_CGEN(config_stats, stats_hpa_slabs_npageslabs_nonhuge,
     ctl_stats->hpastats.psset_stats.slabs[0].npageslabs, size_t)
 CTL_RO_CGEN(config_stats, stats_hpa_slabs_nactive_nonhuge,

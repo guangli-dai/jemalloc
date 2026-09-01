@@ -163,6 +163,7 @@ void sec_stats_merge(tsdn_t *tsdn, const sec_t *sec, sec_stats_t *stats);
 void sec_stats_merge_pszind(
     tsdn_t *tsdn, const sec_t *sec, pszind_t pszind,
     sec_pszind_stats_t *stats);
+void sec_mutex_prof_reset(tsdn_t *tsdn, sec_t *sec);
 void sec_mutex_stats_read(
     tsdn_t *tsdn, sec_t *sec, mutex_prof_data_t *mutex_prof_data);
 

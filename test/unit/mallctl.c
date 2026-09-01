@@ -2115,6 +2115,54 @@ TEST_BEGIN(test_hpa_topology) {
 	expect_u_ge(nshards, npools, "every pool needs at least one shard");
 	expect_u_le(nshards, HPA_MAX_SHARDS_TOTAL,
 	    "more shards than an extent's owner field can address");
+
+	/*
+	 * Per-pool topology.  Bands must tile [PAGE, HUGEPAGE] with no gap;
+	 * shard slices must not overlap; and the index must stop at npools.
+	 */
+	size_t expect_min = PAGE;
+	unsigned expect_first = 0;
+	for (unsigned i = 0; i < npools; i++) {
+		char        name[128];
+		size_t      size_min, size_max, sz;
+		unsigned    pool_nshards, first_shard;
+		const char *pick;
+
+#define POOL_GET(field, out)                                                   \
+	malloc_snprintf(name, sizeof(name), "hpa.pool.%u." field, i);          \
+	sz = sizeof(out);                                                      \
+	expect_d_eq(mallctl(name, &out, &sz, NULL, 0), 0,                      \
+	    "%s should be readable", name);
+		POOL_GET("size_min", size_min)
+		POOL_GET("size_max", size_max)
+		POOL_GET("nshards", pool_nshards)
+		POOL_GET("first_shard", first_shard)
+		POOL_GET("pick", pick)
+#undef POOL_GET
+
+		expect_zu_eq(size_min, expect_min,
+		    "pool %u starts at %zu, leaving a gap after %zu", i,
+		    size_min, expect_min);
+		expect_zu_ge(size_max, size_min, "pool %u has an empty band", i);
+		expect_u_eq(first_shard, expect_first,
+		    "pool %u's shards do not follow the previous pool's", i);
+		expect_u_gt(pool_nshards, 0, "pool %u has no shards", i);
+		expect_ptr_not_null(pick, "pool %u has no picker name", i);
+		expect_min = size_max + 1;
+		expect_first += pool_nshards;
+	}
+	expect_zu_eq(expect_min, HUGEPAGE + 1,
+	    "the last band does not reach HUGEPAGE");
+	expect_u_eq(expect_first, nshards,
+	    "the pools' shards do not add up to hpa.nshards");
+
+	/* One past the end must not resolve. */
+	char   past[128];
+	size_t past_size_min;
+	size_t past_sz = sizeof(past_size_min);
+	malloc_snprintf(past, sizeof(past), "hpa.pool.%u.size_min", npools);
+	expect_d_ne(mallctl(past, &past_size_min, &past_sz, NULL, 0), 0,
+	    "%s should not exist", past);
 }
 TEST_END
 

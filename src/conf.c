@@ -295,6 +295,68 @@ conf_handle_char_p(const char *v, size_t vlen, char *dest, size_t dest_sz) {
 	return false;
 }
 
+/*
+ * One segment of hpa_pool_opts: "<size_start>-<size_end>:<key>=<value>", with
+ * segments separated by '|'.  Advances *cur past the segment and any
+ * separator.  Returns true on a malformed segment.
+ *
+ * Deliberately not multi_setting_parse_next(): that grammar's third field is a
+ * number, and here it is a name plus a value whose type depends on the name.
+ */
+static bool
+hpa_pool_opt_parse_next(const char **cur, size_t *left, size_t *size_start,
+    size_t *size_end, const char **key, size_t *keylen, const char **val,
+    size_t *vallen) {
+	const char *p = *cur;
+	const char *end = *cur + *left;
+	char       *num_end;
+
+	set_errno(0);
+	uintmax_t start = malloc_strtoumax(p, &num_end, 0);
+	if (get_errno() != 0 || num_end == p || num_end >= end
+	    || *num_end != '-') {
+		return true;
+	}
+	p = num_end + 1;
+	uintmax_t stop = malloc_strtoumax(p, &num_end, 0);
+	if (get_errno() != 0 || num_end == p || num_end >= end
+	    || *num_end != ':') {
+		return true;
+	}
+	p = num_end + 1;
+
+	const char *kbegin = p;
+	while (p < end && *p != '=' && *p != '|') {
+		p++;
+	}
+	if (p == kbegin || p == end || *p != '=') {
+		return true;
+	}
+	*key = kbegin;
+	*keylen = (size_t)(p - kbegin);
+	p++;
+
+	const char *vbegin = p;
+	while (p < end && *p != '|') {
+		p++;
+	}
+	if (p == vbegin) {
+		return true;
+	}
+	*val = vbegin;
+	*vallen = (size_t)(p - vbegin);
+
+	/* Consume the separator if there is one. */
+	if (p < end) {
+		p++;
+	}
+	*size_start = (size_t)start;
+	*size_end = (size_t)stop;
+	*left = (size_t)(end - p);
+	*cur = p;
+	return false;
+}
+
 JEMALLOC_DIAGNOSTIC_POP
 
 /* Number of sources for initializing malloc_conf */
@@ -903,13 +965,20 @@ malloc_conf_init_helper(sc_data_t *sc_data, unsigned bin_shard_sizes[SC_NBINS],
 			    "hpa_min_purge_delay_ms", 0, UINT64_MAX,
 			    CONF_DONT_CHECK_MIN, CONF_DONT_CHECK_MAX, false);
 
-			if (strncmp("hpa_hugify_style", k, klen) == 0) {
+			/*
+			 * Both the key and the value are matched on length as
+			 * well as content.  strncmp() alone matches a prefix,
+			 * so "hpa_hugify_styl:e" would have set the style to
+			 * "eager" and "hpa_hugify_style:l" to "lazy".
+			 */
+			if (CONF_MATCH("hpa_hugify_style")) {
 				bool match = false;
 				for (int m = 0; m < hpa_hugify_style_limit;
 				    m++) {
-					if (strncmp(hpa_hugify_style_names[m],
-					        v, vlen)
-					    == 0) {
+					const char *name
+					    = hpa_hugify_style_names[m];
+					if (strlen(name) == vlen
+					    && strncmp(name, v, vlen) == 0) {
 						opt_hpa_opts.hugify_style = m;
 						match = true;
 						break;
@@ -927,12 +996,13 @@ malloc_conf_init_helper(sc_data_t *sc_data, unsigned bin_shard_sizes[SC_NBINS],
 			CONF_HANDLE_SIZE_T(opt_hpa_pool_nshards_max,
 			    "hpa_pool_nshards_max", 1, HPA_MAX_SHARDS_TOTAL,
 			    CONF_CHECK_MIN, CONF_CHECK_MAX, false)
-			if (strncmp("hpa_pool_pick", k, klen) == 0) {
+			if (CONF_MATCH("hpa_pool_pick")) {
 				bool match = false;
 				for (int m = 0; m < hpa_pool_pick_limit; m++) {
-					if (strncmp(hpa_pool_pick_names[m], v,
-					        vlen)
-					    == 0) {
+					const char *name
+					    = hpa_pool_pick_names[m];
+					if (strlen(name) == vlen
+					    && strncmp(name, v, vlen) == 0) {
 						opt_hpa_pool_layout.pick = m;
 						match = true;
 						break;
@@ -974,6 +1044,22 @@ malloc_conf_init_helper(sc_data_t *sc_data, unsigned bin_shard_sizes[SC_NBINS],
 					        &opt_hpa_pool_layout,
 					        size_start, size_end,
 					        (unsigned)nshards)) {
+						/*
+						 * Bands are appended as they
+						 * parse, so a failure part way
+						 * through leaves a prefix
+						 * behind.  With
+						 * abort_conf:false that prefix
+						 * would boot -- and a prefix
+						 * of a layout is a different
+						 * layout, not a partial one.
+						 * Throw it away so the
+						 * fallback is the identity
+						 * layout.
+						 */
+						hpa_pool_layout_init(
+						    &opt_hpa_pool_layout);
+						opt_hpa_pool_layout.pick = pick;
 						CONF_ERROR(
 						    "Invalid settings for "
 						    "hpa_pools",
@@ -981,6 +1067,49 @@ malloc_conf_init_helper(sc_data_t *sc_data, unsigned bin_shard_sizes[SC_NBINS],
 						break;
 					}
 				} while (vlen_left > 0);
+				CONF_CONTINUE;
+			}
+
+			if (CONF_MATCH("hpa_pool_opts")) {
+				/*
+				 * <size_start>-<size_end>:<key>=<value>,
+				 * segments separated by '|'.  Bands are named
+				 * by range rather than by index so that
+				 * reordering hpa_pools cannot silently
+				 * re-target an override.
+				 *
+				 * Applied to a copy and committed only if
+				 * every segment parses: a setting that half
+				 * took effect is a configuration nobody wrote,
+				 * and with abort_conf:false it would boot.
+				 */
+				hpa_pool_layout_t staged
+				    = opt_hpa_pool_layout;
+				const char *cur = v;
+				size_t      left = vlen;
+				bool        bad = false;
+				while (left > 0) {
+					size_t      size_start, size_end;
+					const char *ok, *ov;
+					size_t      oklen, ovlen;
+					if (hpa_pool_opt_parse_next(&cur, &left,
+					        &size_start, &size_end, &ok,
+					        &oklen, &ov, &ovlen)
+					    || hpa_pool_layout_set_opt(&staged,
+					        size_start, size_end, ok, oklen,
+					        ov, ovlen)) {
+						bad = true;
+						break;
+					}
+				}
+				if (bad) {
+					CONF_ERROR(
+					    "Invalid settings for "
+					    "hpa_pool_opts",
+					    k, klen, v, vlen);
+				} else {
+					opt_hpa_pool_layout = staged;
+				}
 				CONF_CONTINUE;
 			}
 

@@ -5,6 +5,7 @@
 #include "jemalloc/internal/arena_stats.h"
 #include "jemalloc/internal/background_thread.h"
 #include "jemalloc/internal/bin_stats.h"
+#include "jemalloc/internal/hpa_pool.h"
 #include "jemalloc/internal/jemalloc_internal_types.h"
 #include "jemalloc/internal/malloc_io.h"
 #include "jemalloc/internal/mutex_prof.h"
@@ -75,6 +76,8 @@ typedef struct ctl_stats_s {
 	 * stats.arenas.<i>.hpa_shard, which no longer means anything.
 	 */
 	hpa_shard_stats_t hpastats;
+	/* Per-pool figures; only the first hpa_pools_global.npools are live. */
+	hpa_pool_stats_t  hpapoolstats[HPA_MAX_POOLS];
 } ctl_stats_t;
 
 typedef struct ctl_arena_s ctl_arena_t;

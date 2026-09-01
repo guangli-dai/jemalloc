@@ -109,6 +109,14 @@ setup_arena(void) {
 		return false;
 	}
 	/*
+	 * Same reason, other axis: the sizes below span most of a hugepage, so
+	 * a layout with more than one band routes them to different shards by
+	 * design and they cannot pack together.
+	 */
+	if (hpa_pools_global.npools > 1) {
+		return false;
+	}
+	/*
 	 * Shards already spoken for: arena 0's, plus any an earlier test case
 	 * in this process used.  An earlier case leaves a retained empty
 	 * pageslab behind, and reusing that shard would make the next case
