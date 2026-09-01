@@ -88,7 +88,8 @@ pools_configured(void) {
 	    || hpa_pools_global.npools != NPOOLS_EXPECTED) {
 		return false;
 	}
-	return hpa_pools_global.pools[SMALL_POOL].size_max == SMALL_BAND_MAX
+	return hpa_pools_global.pools[SMALL_POOL].size_max
+	        == (size_t)SMALL_BAND_MAX
 	    && hpa_pools_global.pools[BIG_POOL].size_max == HUGEPAGE;
 }
 
@@ -116,7 +117,7 @@ TEST_BEGIN(test_overrides_reach_the_shards) {
 	hpa_shard_t *big = pool_shard(BIG_POOL, 0);
 	hpa_shard_t *small = pool_shard(SMALL_POOL, 0);
 
-	expect_zu_eq(big->opts.hugification_threshold, BIG_THRESHOLD,
+	expect_zu_eq(big->opts.hugification_threshold, (size_t)BIG_THRESHOLD,
 	    "the big band did not get its own hugification threshold");
 	expect_u64_eq(big->opts.hugify_delay_ms, 0,
 	    "the big band did not get its own hugify delay");
@@ -273,9 +274,11 @@ TEST_BEGIN(test_singletons_do_not_thrash) {
 	expect_u64_le(hugifies, 4,
 	    "16 alloc/free cycles caused %" FMTu64 " hugifications; the "
 	    "pageslab is being rebuilt rather than reused", hugifies);
-	expect_u64_le(dehugifies, hugifies,
-	    "more dehugifications (%" FMTu64 ") than hugifications (%" FMTu64
-	    ")", dehugifies, hugifies);
+	expect_u64_eq(dehugifies, 0,
+	    "%" FMTu64 " dehugifications; the pageslab is being handed back "
+	    "and re-hugified rather than held", dehugifies);
+	expect_zu_ge(shard->psset.stats.slabs[1].npageslabs, 1,
+	    "the band holds no hugified pageslab");
 }
 TEST_END
 

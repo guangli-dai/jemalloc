@@ -7,6 +7,9 @@
 /*
  * Band bounds are byte literals because MALLOC_CONF is a string.  This test
  * skips page geometries not described below.
+ *
+ * The three sizes are one per band, all above SC_LARGE_MINCLASS so they take
+ * the large path and reach the HPA as the size asked for.
  */
 #if LG_HUGEPAGE == 21 && LG_PAGE == 12
 #define POOLS_CONF "hpa_pools:1-16384:4|16385-65536:4|65537-2097152:4,"
@@ -20,6 +23,9 @@
 #define SIZE_BAND_2 1572864
 #else
 #define POOLS_CONF ""
+#define SIZE_BAND_0 0
+#define SIZE_BAND_1 0
+#define SIZE_BAND_2 0
 #endif
 
 const char *malloc_conf = POOLS_CONF
@@ -45,18 +51,17 @@ const char *malloc_conf = POOLS_CONF
 #define NPOOLS_EXPECTED 3
 
 /*
- * One size per band, and all above SC_LARGE_MINCLASS so they take the large
- * path and reach the HPA as the size asked for.  Nothing below depends on the
- * landing being what it looks like, though: every assertion recomputes the
- * pool from the extent size the router actually saw.
+ * Nothing below depends on the landing being what it looks like: every
+ * assertion recomputes the pool from the extent size the router actually saw.
  */
-static const size_t test_sizes[] = {4 * PAGE, 16 * PAGE, 128 * PAGE};
+static const size_t test_sizes[]
+    = {SIZE_BAND_0, SIZE_BAND_1, SIZE_BAND_2};
 #define NSIZES (sizeof(test_sizes) / sizeof(test_sizes[0]))
 
 static bool
 pools_configured(void) {
-	return hpa_supported() && opt_hpa && !opt_cache_oblivious
-	    && hpa_pools_ready()
+	return POOLS_CONF[0] != '\0' && hpa_supported() && opt_hpa
+	    && !opt_cache_oblivious && hpa_pools_ready()
 	    && hpa_pools_global.npools == NPOOLS_EXPECTED;
 }
 

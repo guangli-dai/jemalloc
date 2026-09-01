@@ -506,6 +506,11 @@ MUTEX_PROF_GLOBAL_MUTEXES
 MUTEX_PROF_ARENA_MUTEXES
 #undef OP
 
+/* Per HPA pool mutexes. */
+MUTEX_STATS_CTL_PROTO_GEN(hpa_pool_i_mutexes_hpa_shard)
+MUTEX_STATS_CTL_PROTO_GEN(hpa_pool_i_mutexes_hpa_shard_grow)
+MUTEX_STATS_CTL_PROTO_GEN(hpa_pool_i_mutexes_hpa_sec)
+
 /* Arena bin mutexes. */
 MUTEX_STATS_CTL_PROTO_GEN(arenas_i_bins_j_mutex)
 #undef MUTEX_STATS_CTL_PROTO_GEN
@@ -945,6 +950,16 @@ static const ctl_indexed_node_t stats_hpa_alloc_node[] = {
  * a pool's pageslabs actually went huge, which is what a per-pool
  * hugification threshold is tuned against.
  */
+MUTEX_PROF_DATA_NODE(hpa_pool_i_mutexes_hpa_shard)
+MUTEX_PROF_DATA_NODE(hpa_pool_i_mutexes_hpa_shard_grow)
+MUTEX_PROF_DATA_NODE(hpa_pool_i_mutexes_hpa_sec)
+
+static const ctl_named_node_t stats_hpa_pool_i_mutexes_node[] = {
+    {NAME("hpa_shard"), CHILD(named, stats_hpa_pool_i_mutexes_hpa_shard)},
+    {NAME("hpa_shard_grow"),
+        CHILD(named, stats_hpa_pool_i_mutexes_hpa_shard_grow)},
+    {NAME("hpa_sec"), CHILD(named, stats_hpa_pool_i_mutexes_hpa_sec)}};
+
 static const ctl_named_node_t stats_hpa_pool_i_node[] = {
     {NAME("npageslabs_nonhuge"), CTL(stats_hpa_pool_i_npageslabs_nonhuge)},
     {NAME("npageslabs_huge"), CTL(stats_hpa_pool_i_npageslabs_huge)},
@@ -956,7 +971,8 @@ static const ctl_named_node_t stats_hpa_pool_i_node[] = {
     {NAME("npurges"), CTL(stats_hpa_pool_i_npurges)},
     {NAME("nhugifies"), CTL(stats_hpa_pool_i_nhugifies)},
     {NAME("nhugify_failures"), CTL(stats_hpa_pool_i_nhugify_failures)},
-    {NAME("ndehugifies"), CTL(stats_hpa_pool_i_ndehugifies)}};
+    {NAME("ndehugifies"), CTL(stats_hpa_pool_i_ndehugifies)},
+    {NAME("mutexes"), CHILD(named, stats_hpa_pool_i_mutexes)}};
 
 static const ctl_named_node_t super_stats_hpa_pool_i_node[] = {
     {NAME(""), CHILD(named, stats_hpa_pool_i)}};
@@ -1788,22 +1804,28 @@ ctl_refresh(tsdn_t *tsdn) {
 #undef READ_GLOBAL_MUTEX_PROF_DATA
 
 		/*
-		 * The HPA locks are summed rather than read, since there is one
-		 * set per shard.  Zero first: unlike the singletons above,
-		 * accumulating into last epoch's figures would double-count.
+		 * The HPA locks are summed from the per-pool figures gathered
+		 * above, rather than read from the shards again.
+		 *
+		 * A second walk would not merely cost more locking: taking a
+		 * profiled mutex increments its own profile, so the walk that
+		 * ran second would report every lock operation the first one
+		 * performed.  The whole would then exceed the sum of its parts
+		 * within a single epoch, for no reason a reader could see.
 		 */
-		memset(&ctl_stats->mutex_prof_data[global_prof_mutex_hpa_shard],
-		    0, sizeof(mutex_prof_data_t));
-		memset(&ctl_stats
-		           ->mutex_prof_data[global_prof_mutex_hpa_shard_grow],
-		    0, sizeof(mutex_prof_data_t));
-		memset(&ctl_stats->mutex_prof_data[global_prof_mutex_hpa_sec],
-		    0, sizeof(mutex_prof_data_t));
-		hpa_pools_mtx_stats_read(tsdn,
-		    &ctl_stats->mutex_prof_data[global_prof_mutex_hpa_shard],
-		    &ctl_stats
-		         ->mutex_prof_data[global_prof_mutex_hpa_shard_grow],
-		    &ctl_stats->mutex_prof_data[global_prof_mutex_hpa_sec]);
+		for (unsigned m = 0; m < hpa_pool_mutex_limit; m++) {
+			static const mutex_prof_global_ind_t hpa_mutex_ind[]
+			    = {global_prof_mutex_hpa_shard,
+			        global_prof_mutex_hpa_shard_grow,
+			        global_prof_mutex_hpa_sec};
+			mutex_prof_data_t *dst
+			    = &ctl_stats->mutex_prof_data[hpa_mutex_ind[m]];
+			memset(dst, 0, sizeof(*dst));
+			for (unsigned i = 0; i < HPA_MAX_POOLS; i++) {
+				malloc_mutex_prof_merge(dst,
+				    &ctl_stats->hpapoolstats[i].mutexes[m]);
+			}
+		}
 	}
 	ctl_arenas->epoch++;
 }
@@ -4305,6 +4327,15 @@ MUTEX_PROF_GLOBAL_MUTEXES
 	        ->astats->astats.mutex_prof_data[arena_prof_mutex_##mtx])
 MUTEX_PROF_ARENA_MUTEXES
 #undef OP
+
+/* Per HPA pool mutexes. */
+#define POOL_MUTEX(name, which)                                                \
+	RO_MUTEX_CTL_GEN(hpa_pool_i_mutexes_##name,                            \
+	    ctl_stats->hpapoolstats[mib[3]].mutexes[which])
+POOL_MUTEX(hpa_shard, hpa_pool_mutex_shard)
+POOL_MUTEX(hpa_shard_grow, hpa_pool_mutex_shard_grow)
+POOL_MUTEX(hpa_sec, hpa_pool_mutex_sec)
+#undef POOL_MUTEX
 
 /* tcache bin mutex */
 RO_MUTEX_CTL_GEN(

@@ -76,20 +76,31 @@ struct hpa_pool_s {
 	malloc_mutex_t init_mtx;
 };
 
+/* Keep option identifiers, configuration names, and application in sync. */
+#define HPA_POOL_SHARD_OPTS                                                    \
+	OP(slab_max_alloc)                                                     \
+	OP(hugification_threshold)                                             \
+	OP(dirty_mult)                                                         \
+	OP(hugify_delay_ms)                                                    \
+	OP(hugify_sync)                                                        \
+	OP(min_purge_interval_ms)                                              \
+	OP(purge_threshold)                                                    \
+	OP(min_purge_delay_ms)                                                 \
+	OP(hugify_style)
+
+#define HPA_POOL_SEC_OPTS                                                      \
+	OP(nshards)                                                            \
+	OP(max_alloc)                                                          \
+	OP(max_bytes)
+
 /* Configuration used to construct a pool set. */
 typedef enum hpa_pool_opt_e {
-	hpa_pool_opt_slab_max_alloc,
-	hpa_pool_opt_hugification_threshold,
-	hpa_pool_opt_dirty_mult,
-	hpa_pool_opt_hugify_delay_ms,
-	hpa_pool_opt_hugify_sync,
-	hpa_pool_opt_min_purge_interval_ms,
-	hpa_pool_opt_purge_threshold,
-	hpa_pool_opt_min_purge_delay_ms,
-	hpa_pool_opt_hugify_style,
-	hpa_pool_opt_sec_nshards,
-	hpa_pool_opt_sec_max_alloc,
-	hpa_pool_opt_sec_max_bytes,
+#define OP(field) hpa_pool_opt_##field,
+	HPA_POOL_SHARD_OPTS
+#undef OP
+#define OP(field) hpa_pool_opt_sec_##field,
+	HPA_POOL_SEC_OPTS
+#undef OP
 	hpa_pool_opt_limit
 } hpa_pool_opt_t;
 
@@ -240,6 +251,13 @@ void hpa_pools_set_deferral_allowed(tsdn_t *tsdn, bool allowed);
 void hpa_pools_do_deferred_work(tsdn_t *tsdn);
 uint64_t hpa_pools_time_until_deferred_work(tsdn_t *tsdn);
 typedef struct hpa_pool_stats_s hpa_pool_stats_t;
+typedef enum hpa_pool_mutex_e {
+	hpa_pool_mutex_shard,
+	hpa_pool_mutex_shard_grow,
+	hpa_pool_mutex_sec,
+	hpa_pool_mutex_limit
+} hpa_pool_mutex_t;
+
 struct hpa_pool_stats_s {
 	size_t npageslabs_huge;
 	size_t npageslabs_nonhuge;
@@ -252,15 +270,13 @@ struct hpa_pool_stats_s {
 	uint64_t nhugifies;
 	uint64_t nhugify_failures;
 	uint64_t ndehugifies;
+	mutex_prof_data_t mutexes[hpa_pool_mutex_limit];
 };
 
 void hpa_pools_stats_merge(tsdn_t *tsdn, hpa_shard_stats_t *dst,
     hpa_pool_stats_t *pool_dst, unsigned npools);
 void hpa_pools_flush(tsdn_t *tsdn);
 void hpa_pools_purge(tsdn_t *tsdn);
-void hpa_pools_mtx_stats_read(tsdn_t *tsdn,
-    mutex_prof_data_t *shard_data, mutex_prof_data_t *grow_data,
-    mutex_prof_data_t *sec_data);
 void hpa_pools_mtx_prof_reset(tsdn_t *tsdn);
 
 /* The two composed: the whole of the allocation-side routing decision. */

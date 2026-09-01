@@ -5,10 +5,14 @@
 #include "jemalloc/internal/malloc_io.h"
 
 const char *const hpa_pool_pick_type_names[] = {"arena", "roundrobin"};
-const char *const hpa_pool_opt_names[] = {"slab_max_alloc",
-    "hugification_threshold", "dirty_mult", "hugify_delay_ms", "hugify_sync",
-    "min_purge_interval_ms", "purge_threshold", "min_purge_delay_ms",
-    "hugify_style", "sec_nshards", "sec_max_alloc", "sec_max_bytes"};
+const char *const hpa_pool_opt_names[] = {
+#define OP(field) #field,
+	HPA_POOL_SHARD_OPTS
+#undef OP
+#define OP(field) "sec_" #field,
+	HPA_POOL_SEC_OPTS
+#undef OP
+};
 
 hpa_pool_set_t hpa_pools_global;
 
@@ -189,34 +193,19 @@ static void
 hpa_pool_opts_apply(hpa_shard_opts_t *opts, sec_opts_t *sec_opts,
     const hpa_pool_config_t *config) {
 	uint32_t set = config->opts_set;
-#define APPLY(which, dst, src)                                                 \
-	if ((set & ((uint32_t)1 << (which))) != 0) {                           \
-		dst = src;                                                     \
+#define OP(field)                                                              \
+	if ((set & ((uint32_t)1 << hpa_pool_opt_##field)) != 0) {              \
+		opts->field = config->opts.field;                                \
 	}
-	APPLY(hpa_pool_opt_slab_max_alloc, opts->slab_max_alloc,
-	    config->opts.slab_max_alloc)
-	APPLY(hpa_pool_opt_hugification_threshold, opts->hugification_threshold,
-	    config->opts.hugification_threshold)
-	APPLY(hpa_pool_opt_dirty_mult, opts->dirty_mult, config->opts.dirty_mult)
-	APPLY(hpa_pool_opt_hugify_delay_ms, opts->hugify_delay_ms,
-	    config->opts.hugify_delay_ms)
-	APPLY(hpa_pool_opt_hugify_sync, opts->hugify_sync,
-	    config->opts.hugify_sync)
-	APPLY(hpa_pool_opt_min_purge_interval_ms, opts->min_purge_interval_ms,
-	    config->opts.min_purge_interval_ms)
-	APPLY(hpa_pool_opt_purge_threshold, opts->purge_threshold,
-	    config->opts.purge_threshold)
-	APPLY(hpa_pool_opt_min_purge_delay_ms, opts->min_purge_delay_ms,
-	    config->opts.min_purge_delay_ms)
-	APPLY(hpa_pool_opt_hugify_style, opts->hugify_style,
-	    config->opts.hugify_style)
-	APPLY(hpa_pool_opt_sec_nshards, sec_opts->nshards,
-	    config->sec_opts.nshards)
-	APPLY(hpa_pool_opt_sec_max_alloc, sec_opts->max_alloc,
-	    config->sec_opts.max_alloc)
-	APPLY(hpa_pool_opt_sec_max_bytes, sec_opts->max_bytes,
-	    config->sec_opts.max_bytes)
-#undef APPLY
+	HPA_POOL_SHARD_OPTS
+#undef OP
+#define OP(field)                                                              \
+	if ((set & ((uint32_t)1 << hpa_pool_opt_sec_##field)) != 0) {          \
+		sec_opts->field = config->sec_opts.field;                        \
+	}
+	HPA_POOL_SEC_OPTS
+#undef OP
+	assert((set & ~(((uint32_t)1 << hpa_pool_opt_limit) - 1)) == 0);
 }
 
 /*
@@ -615,6 +604,17 @@ hpa_pools_stats_merge(tsdn_t *tsdn, hpa_shard_stats_t *dst,
 				if (out == NULL) {
 					continue;
 				}
+				malloc_mutex_lock(tsdn, &shard->grow_mtx);
+				malloc_mutex_prof_accum(tsdn,
+				    &out->mutexes[hpa_pool_mutex_shard_grow],
+				    &shard->grow_mtx);
+				malloc_mutex_unlock(tsdn, &shard->grow_mtx);
+				malloc_mutex_lock(tsdn, &shard->mtx);
+				malloc_mutex_prof_accum(tsdn,
+				    &out->mutexes[hpa_pool_mutex_shard], &shard->mtx);
+				malloc_mutex_unlock(tsdn, &shard->mtx);
+				sec_mutex_stats_read(tsdn, &shard->sec,
+				    &out->mutexes[hpa_pool_mutex_sec]);
 				psset_stats_t *ps = &stats.psset_stats;
 				out->npageslabs_nonhuge += ps->slabs[0].npageslabs;
 				out->npageslabs_huge += ps->slabs[1].npageslabs;
@@ -645,32 +645,6 @@ void
 hpa_pools_purge(tsdn_t *tsdn) {
 	hpa_pools_flush(tsdn);
 	hpa_pools_do_deferred_work(tsdn);
-}
-
-void
-hpa_pools_mtx_stats_read(tsdn_t *tsdn, mutex_prof_data_t *shard_data,
-    mutex_prof_data_t *grow_data, mutex_prof_data_t *sec_data) {
-	if (!hpa_pools_ready()) {
-		return;
-	}
-	for (unsigned i = 0; i < hpa_pools_global.npools; i++) {
-		hpa_pool_t *pool = &hpa_pools_global.pools[i];
-		for (unsigned j = 0; j < pool->nshards; j++) {
-			hpa_shard_t *shard = atomic_load_p(&pool->shards[j],
-			    ATOMIC_ACQUIRE);
-			if (shard == NULL) {
-				continue;
-			}
-			malloc_mutex_lock(tsdn, &shard->grow_mtx);
-			malloc_mutex_prof_accum(tsdn, grow_data,
-			    &shard->grow_mtx);
-			malloc_mutex_unlock(tsdn, &shard->grow_mtx);
-			malloc_mutex_lock(tsdn, &shard->mtx);
-			malloc_mutex_prof_accum(tsdn, shard_data, &shard->mtx);
-			malloc_mutex_unlock(tsdn, &shard->mtx);
-			sec_mutex_stats_read(tsdn, &shard->sec, sec_data);
-		}
-	}
 }
 
 void

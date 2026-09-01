@@ -346,9 +346,16 @@ hpa_pool_opt_parse_next(const char **cur, size_t *left, size_t *size_start,
 	*val = vbegin;
 	*vallen = (size_t)(p - vbegin);
 
-	/* Consume the separator if there is one. */
+	/*
+	 * Consume the separator if there is one -- but a separator at the very
+	 * end means a trailing empty segment, which is a typo rather than a
+	 * grammar the caller meant to write.
+	 */
 	if (p < end) {
 		p++;
+		if (p == end) {
+			return true;
+		}
 	}
 	*size_start = (size_t)start;
 	*size_end = (size_t)stop;
@@ -464,6 +471,14 @@ static void
 validate_hpa_settings(void) {
 	if (!hpa_supported() || !opt_hpa) {
 		return;
+	}
+	/* Validate an explicit pool configuration even when pools are disabled. */
+	if (opt_hpa_pool_configs.npools > 0) {
+		hpa_pool_configs_t check = opt_hpa_pool_configs;
+		check.nshards_max = (unsigned)opt_hpa_pool_nshards_max;
+		if (hpa_pool_configs_validate(&check)) {
+			had_conf_error = true;
+		}
 	}
 	if (HUGEPAGE > HUGEPAGE_MAX_EXPECTED_SIZE) {
 		had_conf_error = true;
