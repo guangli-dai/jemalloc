@@ -2118,7 +2118,6 @@ TEST_BEGIN(test_hpa_topology) {
 
 	/* Requested-size bands must tile [1, HUGEPAGE]. */
 	size_t expect_min = 1;
-	unsigned expect_first = 0;
 	for (unsigned i = 0; i < npools; i++) {
 		char        name[128];
 		size_t      size_min, size_max, sz;
@@ -2141,17 +2140,14 @@ TEST_BEGIN(test_hpa_topology) {
 		    "pool %u starts at %zu, leaving a gap after %zu", i,
 		    size_min, expect_min);
 		expect_zu_ge(size_max, size_min, "pool %u has an empty band", i);
-		expect_u_eq(first_shard, expect_first,
-		    "pool %u's shards do not follow the previous pool's", i);
+		expect_u_eq(first_shard, i * HPA_MAX_SHARDS_PER_POOL,
+		    "pool %u has the wrong stable shard-id base", i);
 		expect_u_gt(pool_nshards, 0, "pool %u has no shards", i);
 		expect_ptr_not_null(pick, "pool %u has no picker name", i);
 		expect_min = size_max + 1;
-		expect_first += pool_nshards;
 	}
 	expect_zu_eq(expect_min, HUGEPAGE + 1,
 	    "the last band does not reach HUGEPAGE");
-	expect_u_eq(expect_first, nshards,
-	    "the pools' shards do not add up to hpa.nshards");
 
 	/* One past the end must not resolve. */
 	char   past[128];

@@ -80,6 +80,20 @@ sec_shard_pick(tsd_t *tsd, sec_t *sec, uint8_t *idxp) {
 	 * Callers must ensure sec->opts.nshards > 1.
 	 */
 	assert(sec->opts.nshards > 1);
+	/*
+	 * The cached index lives in the tsd, one per thread, and is shared by
+	 * every SEC that thread touches -- the HPA SECs and the PAC one.  Their
+	 * shard counts need not agree: per-pool sec_nshards lets two HPA pools
+	 * differ, and experimental_pac_sec_nshards is independent of both.  An
+	 * index picked against a wider SEC would otherwise be used verbatim
+	 * against a narrower one, and sec_bin_pick() only asserts the bound, so
+	 * a release build would index past sec->bins.  Reduce instead of
+	 * re-randomising, so a thread still keeps a stable shard within each
+	 * SEC.
+	 */
+	if (*idxp != (uint8_t)-1 && *idxp >= sec->opts.nshards) {
+		return (uint8_t)(*idxp % sec->opts.nshards);
+	}
 	if (*idxp == (uint8_t)-1) {
 		/*
 		 * First use; initialize using the trick from Daniel Lemire's
@@ -484,6 +498,25 @@ sec_mutex_stats_read(
 		sec_bin_t *bin = &sec->bins[i];
 		malloc_mutex_lock(tsdn, &bin->mtx);
 		malloc_mutex_prof_accum(tsdn, mutex_prof_data, &bin->mtx);
+		malloc_mutex_unlock(tsdn, &bin->mtx);
+	}
+}
+
+/*
+ * stats.mutexes.reset has to reach these too.  Without it the SEC line keeps
+ * pre-reset counts while every other lock restarts from zero, which reads as
+ * the SEC being the contention point.
+ */
+void
+sec_mutex_prof_reset(tsdn_t *tsdn, sec_t *sec) {
+	if (!sec_is_used(sec)) {
+		return;
+	}
+	size_t ntotal_bins = sec->opts.nshards * sec->npsizes;
+	for (pszind_t i = 0; i < ntotal_bins; i++) {
+		sec_bin_t *bin = &sec->bins[i];
+		malloc_mutex_lock(tsdn, &bin->mtx);
+		malloc_mutex_prof_data_reset(tsdn, &bin->mtx);
 		malloc_mutex_unlock(tsdn, &bin->mtx);
 	}
 }

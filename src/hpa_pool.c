@@ -5,6 +5,10 @@
 #include "jemalloc/internal/malloc_io.h"
 
 const char *const hpa_pool_pick_type_names[] = {"arena", "roundrobin"};
+const char *const hpa_pool_opt_names[] = {"slab_max_alloc",
+    "hugification_threshold", "dirty_mult", "hugify_delay_ms", "hugify_sync",
+    "min_purge_interval_ms", "purge_threshold", "min_purge_delay_ms",
+    "hugify_style", "sec_nshards", "sec_max_alloc", "sec_max_bytes"};
 
 hpa_pool_set_t hpa_pools_global;
 
@@ -47,6 +51,172 @@ hpa_pool_configs_add(hpa_pool_configs_t *configs, size_t size_start,
 	configs->pools[configs->npools].nshards = nshards;
 	configs->npools++;
 	return false;
+}
+
+static bool
+hpa_pool_parse_u64(const char *val, size_t len, uint64_t min, uint64_t max,
+    uint64_t *out) {
+	char *end;
+	uintmax_t parsed = malloc_strtoumax(val, &end, 0);
+	if (end != val + len || parsed < min || parsed > max) {
+		return true;
+	}
+	*out = (uint64_t)parsed;
+	return false;
+}
+
+static bool
+hpa_pool_parse_size(const char *val, size_t len, size_t min, size_t max,
+    size_t *out) {
+	uint64_t parsed;
+	if (hpa_pool_parse_u64(val, len, min, max, &parsed)) {
+		return true;
+	}
+	*out = (size_t)parsed;
+	return false;
+}
+
+static hpa_pool_config_t *
+hpa_pool_configs_find(hpa_pool_configs_t *configs, size_t size_start,
+    size_t size_end) {
+	size_t start = 1;
+	for (unsigned i = 0; i < configs->npools; i++) {
+		if (start == size_start && configs->pools[i].size_max == size_end) {
+			return &configs->pools[i];
+		}
+		start = configs->pools[i].size_max + 1;
+	}
+	return NULL;
+}
+
+bool
+hpa_pool_configs_set_opt(hpa_pool_configs_t *configs, size_t size_start,
+    size_t size_end, const char *key, size_t keylen, const char *val,
+    size_t vallen) {
+	hpa_pool_config_t *pool = hpa_pool_configs_find(configs, size_start,
+	    size_end);
+	if (pool == NULL) {
+		return true;
+	}
+	unsigned which = hpa_pool_opt_limit;
+	for (unsigned i = 0; i < hpa_pool_opt_limit; i++) {
+		if (strlen(hpa_pool_opt_names[i]) == keylen
+		    && strncmp(hpa_pool_opt_names[i], key, keylen) == 0) {
+			which = i;
+			break;
+		}
+	}
+	bool err = false;
+	switch (which) {
+	case hpa_pool_opt_slab_max_alloc:
+		err = hpa_pool_parse_size(val, vallen, PAGE, HUGEPAGE,
+		    &pool->opts.slab_max_alloc);
+		break;
+	case hpa_pool_opt_hugification_threshold:
+		err = hpa_pool_parse_size(val, vallen, PAGE, HUGEPAGE,
+		    &pool->opts.hugification_threshold);
+		break;
+	case hpa_pool_opt_dirty_mult:
+		if (vallen == 2 && strncmp(val, "-1", 2) == 0) {
+			pool->opts.dirty_mult = (fxp_t)-1;
+		} else {
+			char *end;
+			err = fxp_parse(&pool->opts.dirty_mult, val, &end)
+			    || (size_t)(end - val) != vallen;
+		}
+		break;
+	case hpa_pool_opt_hugify_delay_ms:
+		err = hpa_pool_parse_u64(val, vallen, 0, UINT64_MAX,
+		    &pool->opts.hugify_delay_ms);
+		break;
+	case hpa_pool_opt_hugify_sync:
+		if (vallen == 4 && strncmp(val, "true", 4) == 0) {
+			pool->opts.hugify_sync = true;
+		} else if (vallen == 5 && strncmp(val, "false", 5) == 0) {
+			pool->opts.hugify_sync = false;
+		} else {
+			err = true;
+		}
+		break;
+	case hpa_pool_opt_min_purge_interval_ms:
+		err = hpa_pool_parse_u64(val, vallen, 0, UINT64_MAX,
+		    &pool->opts.min_purge_interval_ms);
+		break;
+	case hpa_pool_opt_purge_threshold:
+		err = hpa_pool_parse_size(val, vallen, PAGE, HUGEPAGE,
+		    &pool->opts.purge_threshold);
+		break;
+	case hpa_pool_opt_min_purge_delay_ms:
+		err = hpa_pool_parse_u64(val, vallen, 0, UINT64_MAX,
+		    &pool->opts.min_purge_delay_ms);
+		break;
+	case hpa_pool_opt_hugify_style:
+		err = true;
+		for (unsigned i = 0; i < hpa_hugify_style_limit; i++) {
+			const char *name = hpa_hugify_style_names[i];
+			if (strlen(name) == vallen
+			    && strncmp(name, val, vallen) == 0) {
+				pool->opts.hugify_style = (hpa_hugify_style_t)i;
+				err = false;
+				break;
+			}
+		}
+		break;
+	case hpa_pool_opt_sec_nshards:
+		err = hpa_pool_parse_size(val, vallen, 0, 255,
+		    &pool->sec_opts.nshards);
+		break;
+	case hpa_pool_opt_sec_max_alloc:
+		err = hpa_pool_parse_size(val, vallen, PAGE,
+		    USIZE_GROW_SLOW_THRESHOLD, &pool->sec_opts.max_alloc);
+		break;
+	case hpa_pool_opt_sec_max_bytes:
+		err = hpa_pool_parse_size(val, vallen,
+		    SEC_OPTS_MAX_BYTES_DEFAULT, SIZE_T_MAX,
+		    &pool->sec_opts.max_bytes);
+		break;
+	default:
+		return true;
+	}
+	if (err) {
+		return true;
+	}
+	pool->opts_set |= (uint32_t)1 << which;
+	return false;
+}
+
+static void
+hpa_pool_opts_apply(hpa_shard_opts_t *opts, sec_opts_t *sec_opts,
+    const hpa_pool_config_t *config) {
+	uint32_t set = config->opts_set;
+#define APPLY(which, dst, src)                                                 \
+	if ((set & ((uint32_t)1 << (which))) != 0) {                           \
+		dst = src;                                                     \
+	}
+	APPLY(hpa_pool_opt_slab_max_alloc, opts->slab_max_alloc,
+	    config->opts.slab_max_alloc)
+	APPLY(hpa_pool_opt_hugification_threshold, opts->hugification_threshold,
+	    config->opts.hugification_threshold)
+	APPLY(hpa_pool_opt_dirty_mult, opts->dirty_mult, config->opts.dirty_mult)
+	APPLY(hpa_pool_opt_hugify_delay_ms, opts->hugify_delay_ms,
+	    config->opts.hugify_delay_ms)
+	APPLY(hpa_pool_opt_hugify_sync, opts->hugify_sync,
+	    config->opts.hugify_sync)
+	APPLY(hpa_pool_opt_min_purge_interval_ms, opts->min_purge_interval_ms,
+	    config->opts.min_purge_interval_ms)
+	APPLY(hpa_pool_opt_purge_threshold, opts->purge_threshold,
+	    config->opts.purge_threshold)
+	APPLY(hpa_pool_opt_min_purge_delay_ms, opts->min_purge_delay_ms,
+	    config->opts.min_purge_delay_ms)
+	APPLY(hpa_pool_opt_hugify_style, opts->hugify_style,
+	    config->opts.hugify_style)
+	APPLY(hpa_pool_opt_sec_nshards, sec_opts->nshards,
+	    config->sec_opts.nshards)
+	APPLY(hpa_pool_opt_sec_max_alloc, sec_opts->max_alloc,
+	    config->sec_opts.max_alloc)
+	APPLY(hpa_pool_opt_sec_max_bytes, sec_opts->max_bytes,
+	    config->sec_opts.max_bytes)
+#undef APPLY
 }
 
 /*
@@ -223,14 +393,20 @@ hpa_pools_boot(tsdn_t *tsdn, hpa_pool_set_t *set, base_t *base,
 	set->opts = *opts;
 	set->sec_opts = *sec_opts;
 
+	size_t size_min = 1;
 	for (unsigned i = 0; i < local.npools; i++) {
 		hpa_pool_t *pool = &set->pools[i];
+		pool->size_min = size_min;
 		pool->size_max = local.pools[i].size_max;
 		pool->szind_max = sz_size2index(pool->size_max);
 		pool->pool_ind = i;
 		pool->set = set;
 		pool->nshards = local.pools[i].nshards;
 		pool->pick = local.pick;
+		pool->opts = *opts;
+		pool->sec_opts = *sec_opts;
+		hpa_pool_opts_apply(&pool->opts, &pool->sec_opts,
+		    &local.pools[i]);
 		if (malloc_mutex_init(&pool->init_mtx, "hpa_pool_init",
 		    WITNESS_RANK_HPA_POOL, malloc_mutex_rank_exclusive)) {
 			return true;
@@ -239,6 +415,7 @@ hpa_pools_boot(tsdn_t *tsdn, hpa_pool_set_t *set, base_t *base,
 		for (unsigned j = 0; j < HPA_MAX_SHARDS_PER_POOL; j++) {
 			atomic_store_p(&pool->shards[j], NULL, ATOMIC_RELAXED);
 		}
+		size_min = pool->size_max + 1;
 	}
 
 	set->initialized = true;
@@ -278,8 +455,8 @@ hpa_pool_pick_shard(tsdn_t *tsdn, hpa_pool_t *pool, unsigned hint) {
 		    sizeof(hpa_shard_t), CACHELINE);
 		unsigned id = hpa_pool_shard_id(pool, idx);
 		if (shard == NULL || hpa_shard_init(tsdn, shard, set->central,
-		        set->emap, set->base, set->edata_cache, id, &set->opts,
-		        &set->sec_opts)) {
+		        set->emap, set->base, set->edata_cache, id, &pool->opts,
+		        &pool->sec_opts)) {
 			shard = NULL;
 		} else {
 			atomic_store_p(&pool->shards[idx], shard, ATOMIC_RELEASE);
@@ -377,6 +554,9 @@ hpa_pools_set_deferral_allowed(tsdn_t *tsdn, bool allowed) {
 	hpa_pools_deferral_allowed = allowed;
 	hpa_pools_global.opts.deferral_allowed = allowed;
 	if (hpa_pools_ready()) {
+		for (unsigned i = 0; i < hpa_pools_global.npools; i++) {
+			hpa_pools_global.pools[i].opts.deferral_allowed = allowed;
+		}
 		hpa_pools_for_each_shard(tsdn, hpa_pool_enable_deferral);
 	}
 }
@@ -412,17 +592,43 @@ hpa_pools_time_until_deferred_work(tsdn_t *tsdn) {
 }
 
 void
-hpa_pools_stats_merge(tsdn_t *tsdn, hpa_shard_stats_t *dst) {
+hpa_pools_stats_merge(tsdn_t *tsdn, hpa_shard_stats_t *dst,
+    hpa_pool_stats_t *pool_dst, unsigned npools) {
+	if (pool_dst != NULL) {
+		memset(pool_dst, 0, npools * sizeof(*pool_dst));
+	}
 	if (!hpa_pools_ready()) {
 		return;
 	}
 	for (unsigned i = 0; i < hpa_pools_global.npools; i++) {
 		hpa_pool_t *pool = &hpa_pools_global.pools[i];
+		hpa_pool_stats_t *out = pool_dst != NULL && i < npools
+		    ? &pool_dst[i] : NULL;
 		for (unsigned j = 0; j < pool->nshards; j++) {
 			hpa_shard_t *shard = atomic_load_p(&pool->shards[j],
 			    ATOMIC_ACQUIRE);
 			if (shard != NULL) {
-				hpa_shard_stats_merge(tsdn, shard, dst);
+				hpa_shard_stats_t stats;
+				memset(&stats, 0, sizeof(stats));
+				hpa_shard_stats_merge(tsdn, shard, &stats);
+				hpa_shard_stats_accum(dst, &stats);
+				if (out == NULL) {
+					continue;
+				}
+				psset_stats_t *ps = &stats.psset_stats;
+				out->npageslabs_nonhuge += ps->slabs[0].npageslabs;
+				out->npageslabs_huge += ps->slabs[1].npageslabs;
+				out->nactive_nonhuge += ps->slabs[0].nactive;
+				out->nactive_huge += ps->slabs[1].nactive;
+				out->ndirty_nonhuge += ps->slabs[0].ndirty;
+				out->ndirty_huge += ps->slabs[1].ndirty;
+				out->npurge_passes +=
+				    stats.nonderived_stats.npurge_passes;
+				out->npurges += stats.nonderived_stats.npurges;
+				out->nhugifies += stats.nonderived_stats.nhugifies;
+				out->nhugify_failures +=
+				    stats.nonderived_stats.nhugify_failures;
+				out->ndehugifies += stats.nonderived_stats.ndehugifies;
 			}
 		}
 	}
@@ -486,6 +692,7 @@ hpa_pools_mtx_prof_reset(tsdn_t *tsdn) {
 			malloc_mutex_lock(tsdn, &shard->mtx);
 			malloc_mutex_prof_data_reset(tsdn, &shard->mtx);
 			malloc_mutex_unlock(tsdn, &shard->mtx);
+			sec_mutex_prof_reset(tsdn, &shard->sec);
 		}
 	}
 }

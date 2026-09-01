@@ -53,7 +53,8 @@ extern const char *const hpa_pool_pick_type_names[];
 typedef struct hpa_pool_s hpa_pool_t;
 typedef struct hpa_pool_set_s hpa_pool_set_t;
 struct hpa_pool_s {
-	/* Inclusive requested-allocation-size upper bound. */
+	/* Inclusive requested-allocation-size bounds. */
+	size_t size_min;
 	size_t size_max;
 	szind_t szind_max;
 
@@ -64,20 +65,44 @@ struct hpa_pool_s {
 	unsigned pool_ind;
 	hpa_pool_set_t *set;
 
+	/* Mutated on every round-robin allocation. */
+	JEMALLOC_ALIGNED(CACHELINE) atomic_u_t rr_next;
 	atomic_p_t shards[HPA_MAX_SHARDS_PER_POOL];
+	/* Policy shared by all lazily initialized shards in this pool. */
+	hpa_shard_opts_t opts;
+	sec_opts_t sec_opts;
 
 	/* Serializes initialization of NULL shard slots. */
 	malloc_mutex_t init_mtx;
-	/* Kept separate from the read-mostly picker fields. */
-	JEMALLOC_ALIGNED(CACHELINE) atomic_u_t rr_next;
 };
 
 /* Configuration used to construct a pool set. */
+typedef enum hpa_pool_opt_e {
+	hpa_pool_opt_slab_max_alloc,
+	hpa_pool_opt_hugification_threshold,
+	hpa_pool_opt_dirty_mult,
+	hpa_pool_opt_hugify_delay_ms,
+	hpa_pool_opt_hugify_sync,
+	hpa_pool_opt_min_purge_interval_ms,
+	hpa_pool_opt_purge_threshold,
+	hpa_pool_opt_min_purge_delay_ms,
+	hpa_pool_opt_hugify_style,
+	hpa_pool_opt_sec_nshards,
+	hpa_pool_opt_sec_max_alloc,
+	hpa_pool_opt_sec_max_bytes,
+	hpa_pool_opt_limit
+} hpa_pool_opt_t;
+
+extern const char *const hpa_pool_opt_names[];
+
 typedef struct hpa_pool_config_s hpa_pool_config_t;
 struct hpa_pool_config_s {
 	/* Inclusive requested-allocation-size upper bound. */
 	size_t size_max;
 	unsigned nshards;
+	hpa_shard_opts_t opts;
+	sec_opts_t sec_opts;
+	uint32_t opts_set;
 };
 
 typedef struct hpa_pool_configs_s hpa_pool_configs_t;
@@ -169,6 +194,9 @@ hpa_shard_from_edata(const edata_t *edata) {
 void hpa_pool_configs_init(hpa_pool_configs_t *configs);
 bool hpa_pool_configs_add(hpa_pool_configs_t *configs, size_t size_start,
     size_t size_end, unsigned nshards);
+bool hpa_pool_configs_set_opt(hpa_pool_configs_t *configs,
+    size_t size_start, size_t size_end, const char *key, size_t keylen,
+    const char *val, size_t vallen);
 bool hpa_pool_configs_identity(hpa_pool_configs_t *configs, unsigned narenas,
     unsigned nshards_max);
 
@@ -211,7 +239,23 @@ void hpa_pools_postfork_child(tsdn_t *tsdn);
 void hpa_pools_set_deferral_allowed(tsdn_t *tsdn, bool allowed);
 void hpa_pools_do_deferred_work(tsdn_t *tsdn);
 uint64_t hpa_pools_time_until_deferred_work(tsdn_t *tsdn);
-void hpa_pools_stats_merge(tsdn_t *tsdn, hpa_shard_stats_t *dst);
+typedef struct hpa_pool_stats_s hpa_pool_stats_t;
+struct hpa_pool_stats_s {
+	size_t npageslabs_huge;
+	size_t npageslabs_nonhuge;
+	size_t nactive_huge;
+	size_t nactive_nonhuge;
+	size_t ndirty_huge;
+	size_t ndirty_nonhuge;
+	uint64_t npurge_passes;
+	uint64_t npurges;
+	uint64_t nhugifies;
+	uint64_t nhugify_failures;
+	uint64_t ndehugifies;
+};
+
+void hpa_pools_stats_merge(tsdn_t *tsdn, hpa_shard_stats_t *dst,
+    hpa_pool_stats_t *pool_dst, unsigned npools);
 void hpa_pools_flush(tsdn_t *tsdn);
 void hpa_pools_purge(tsdn_t *tsdn);
 void hpa_pools_mtx_stats_read(tsdn_t *tsdn,
