@@ -36,14 +36,14 @@ stats_buf_write_cb(void *opaque, const char *str) {
 
 static const char  *global_mutex_names[] = {"background_thread",
      "max_per_bg_thd", "ctl", "prof", "prof_thds_data", "prof_dump",
-     "prof_recent_alloc", "prof_recent_dump", "prof_stats"};
+     "prof_recent_alloc", "prof_recent_dump", "prof_stats", "hpa_shard",
+     "hpa_shard_grow", "hpa_sec"};
 static const size_t num_global_mutexes = sizeof(global_mutex_names)
     / sizeof(global_mutex_names[0]);
 
 static const char  *arena_mutex_names[] = {"large", "extent_avail",
      "extents_dirty", "extents_muzzy", "extents_retained", "extents_pinned",
-     "decay_dirty", "decay_muzzy", "base", "tcache_list", "hpa_shard",
-     "hpa_shard_grow", "hpa_sec", "pac_sec"};
+     "decay_dirty", "decay_muzzy", "base", "tcache_list", "pac_sec"};
 static const size_t num_arena_mutexes = sizeof(arena_mutex_names)
     / sizeof(arena_mutex_names[0]);
 

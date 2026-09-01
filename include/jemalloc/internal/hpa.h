@@ -240,11 +240,9 @@ void hpa_shard_stats_merge(
     tsdn_t *tsdn, hpa_shard_t *shard, hpa_shard_stats_t *dst);
 
 /*
- * Notify the shard that we won't use it for allocations much longer.  Due to
- * the possibility of races, we don't actually prevent allocations; just flush
- * and disable the embedded edata_cache_small.
+ * Unmap everything the shard holds.  Unreachable from the allocator now that
+ * shards outlive every arena; see the definition.
  */
-void hpa_shard_disable(tsdn_t *tsdn, hpa_shard_t *shard);
 void hpa_shard_destroy(tsdn_t *tsdn, hpa_shard_t *shard);
 /* Flush caches that shard may be using */
 void hpa_shard_flush(tsdn_t *tsdn, hpa_shard_t *shard);

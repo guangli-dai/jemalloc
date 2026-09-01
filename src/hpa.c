@@ -1172,16 +1172,6 @@ hpa_sec_flush_impl(tsdn_t *tsdn, hpa_shard_t *shard) {
 }
 
 void
-hpa_shard_disable(tsdn_t *tsdn, hpa_shard_t *shard) {
-	hpa_do_consistency_checks(shard);
-	hpa_sec_flush_impl(tsdn, shard);
-
-	malloc_mutex_lock(tsdn, &shard->mtx);
-	edata_cache_fast_disable(tsdn, &shard->ecf);
-	malloc_mutex_unlock(tsdn, &shard->mtx);
-}
-
-void
 hpa_shard_flush(tsdn_t *tsdn, hpa_shard_t *shard) {
 	hpa_sec_flush_impl(tsdn, shard);
 }
@@ -1204,6 +1194,15 @@ hpa_assert_empty(tsdn_t *tsdn, hpa_shard_t *shard, psset_t *psset) {
 	}
 }
 
+/*
+ * Tear a shard all the way down, unmapping every hugepage it holds.
+ *
+ * Nothing in the allocator reaches this any more: shards are built once at
+ * boot and live for the process, so there is no "this shard's owner went
+ * away" event.  It survives as the definition of an empty shard -- the unit
+ * tests use it to assert that a workload gave everything back -- and as the
+ * mechanism a future per-pool teardown would need.
+ */
 void
 hpa_shard_destroy(tsdn_t *tsdn, hpa_shard_t *shard) {
 	hpa_do_consistency_checks(shard);

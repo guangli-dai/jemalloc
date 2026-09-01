@@ -6,6 +6,7 @@
 #include "jemalloc/internal/base.h"
 #include "jemalloc/internal/edata.h"
 #include "jemalloc/internal/hpa.h"
+#include "jemalloc/internal/mutex_prof.h"
 #include "jemalloc/internal/psset.h"
 #include "jemalloc/internal/sz.h"
 
@@ -91,21 +92,26 @@ extern const char *const hpa_pool_pick_names[];
 #define HPA_MAX_POOLS 8
 
 /*
- * Ceiling on the identity layout's shard count.
+ * Default ceiling on the total number of shards in the process.
  *
  * Shards used to be created with their arena, so a process with narenas=704
  * but five live arenas had five shards.  Pools are built once at boot and
- * cannot know which arenas will ever exist, so sizing the identity layout at
+ * cannot know which arenas will ever exist, so sizing the default layout at
  * narenas would allocate 704 of them -- roughly 7 MiB of psset and SEC
  * metadata for a process that will use a handful.
  *
  * Capping trades exact topology preservation for bounded memory: above this
  * many arenas, several share a shard.  That is a real deviation from the
  * pre-pool behaviour and is called out in the design docs; it is also, for
- * what it is worth, the direction this project is trying to go, since a
- * shard per arena is what hurts hugepage locality in the first place.
+ * what it is worth, the direction this project is trying to go, since a shard
+ * per arena is what hurts hugepage locality in the first place.
+ *
+ * 64 is a first-version number, not a measured one.  It is the default of
+ * opt_hpa_pool_nshards_max rather than a compile-time constant so that raising
+ * it is a MALLOC_CONF experiment instead of a rebuild; the hard ceiling is
+ * HPA_MAX_SHARDS_TOTAL, set by the width of the extent's owner field.
  */
-#define HPA_IDENTITY_MAX_SHARDS 64
+#define HPA_POOL_NSHARDS_MAX_DEFAULT 64
 
 typedef struct hpa_pool_s hpa_pool_t;
 struct hpa_pool_s {
@@ -151,7 +157,26 @@ struct hpa_pool_layout_s {
 		unsigned nshards;
 	} pools[HPA_MAX_POOLS];
 	hpa_pool_pick_t pick;
+
+	/*
+	 * Ceiling on the sum of the nshards above.  A layout asking for more is
+	 * scaled down proportionally rather than rejected, since the figure a
+	 * caller writes (narenas, say) is a wish rather than a requirement.
+	 */
+	unsigned nshards_max;
 };
+
+/*
+ * Set by MALLOC_CONF, consumed once by malloc_init_hard().
+ *
+ * opt_hpa_shard_pools is the feature switch.  When false -- the default --
+ * malloc_init_hard() ignores the layout below and builds the identity layout
+ * instead, reproducing the pre-pool topology.  Rollback in production is then
+ * a MALLOC_CONF edit rather than a binary revert.
+ */
+extern bool              opt_hpa_shard_pools;
+extern hpa_pool_layout_t opt_hpa_pool_layout;
+extern size_t            opt_hpa_pool_nshards_max;
 
 typedef struct hpa_pool_set_s hpa_pool_set_t;
 struct hpa_pool_set_s {
@@ -199,6 +224,28 @@ hpa_pools_ready(void) {
 }
 
 /*
+ * Does a given (arena, size) pair always reach the same shard?
+ *
+ * Only the arena picker promises that.  Round robin deliberately does not --
+ * spreading is the point -- which invalidates any measurement of "the shard
+ * this arena uses".  Tests that read one shard's psset directly are the
+ * callers: without this they would be sampling a shard chosen at random and
+ * reporting the result as a packing or purging failure.
+ */
+static inline bool
+hpa_pools_shard_is_stable(void) {
+	if (!hpa_pools_global.initialized) {
+		return false;
+	}
+	for (unsigned i = 0; i < hpa_pools_global.npools; i++) {
+		if (hpa_pools_global.pools[i].pick != hpa_pool_pick_arena) {
+			return false;
+		}
+	}
+	return true;
+}
+
+/*
  * The deallocation side of routing, and the reason the owning shard is
  * recorded on the extent at all.  One indexed load; no pool lookup, because
  * getting an extent home does not depend on which pool it came from.
@@ -235,13 +282,24 @@ uint64_t hpa_pools_time_until_deferred_work(tsdn_t *tsdn);
 
 /*
  * Stats.  These are process-wide now: an HPA shard belongs to a pool, not an
- * arena, so there is no per-arena HPA figure to report.  hpa_pools_ndirty()
- * exists because dropping the HPA contribution from the arena walk would
- * silently under-report stats.resident.
+ * arena, so there is no per-arena HPA figure to report.
+ *
+ * ctl takes the HPA share of stats.resident out of the merged psset stats
+ * these produce, rather than sampling the pssets again: dropping the HPA
+ * contribution entirely would silently under-report memory, and re-reading it
+ * unlocked would let resident disagree with the HPA stats beside it.
  */
-void   hpa_pools_stats_merge(tsdn_t *tsdn, hpa_shard_stats_t *dst);
-size_t hpa_pools_ndirty(void);
-void   hpa_pools_flush(tsdn_t *tsdn);
+void hpa_pools_stats_merge(tsdn_t *tsdn, hpa_shard_stats_t *dst);
+void hpa_pools_flush(tsdn_t *tsdn);
+
+/*
+ * Mutex contention, likewise process-wide.  stats.mutexes.hpa_* sums every
+ * shard; there is no arena that could own the figure, and these are the locks
+ * the packing-versus-contention tradeoff is actually paid in.
+ */
+void hpa_pools_mtx_stats_read(tsdn_t *tsdn, mutex_prof_data_t *shard_data,
+    mutex_prof_data_t *grow_data, mutex_prof_data_t *sec_data);
+void hpa_pools_mtx_prof_reset(tsdn_t *tsdn);
 
 /*
  * Flush every shard's SEC and then force its deferred work.  Backs the
@@ -251,11 +309,25 @@ void   hpa_pools_flush(tsdn_t *tsdn);
 void hpa_pools_purge(tsdn_t *tsdn);
 
 /*
+ * Build a layout incrementally, one band at a time -- what the configuration
+ * parser drives.  hpa_pool_layout_add() takes the band inclusive at both ends
+ * and checks it abuts the previous one, so a gap or an overlap is rejected
+ * where it is written rather than surfacing later as a routing hole.
+ */
+void hpa_pool_layout_init(hpa_pool_layout_t *layout);
+bool hpa_pool_layout_add(hpa_pool_layout_t *layout, size_t size_start,
+    size_t size_end, unsigned nshards);
+
+/*
  * The identity layout: one pool spanning everything, one shard per arena,
  * picked by arena index.  This reproduces the pre-pool topology exactly, and
- * is both the default and the thing a rollback switch selects.
+ * is both the default and the thing the rollback switch selects.
+ *
+ * Exactly, that is, up to nshards_max: past that many arenas some of them
+ * share a shard.  See HPA_POOL_NSHARDS_MAX_DEFAULT.
  */
-void hpa_pool_layout_identity(hpa_pool_layout_t *layout, unsigned narenas);
+void hpa_pool_layout_identity(
+    hpa_pool_layout_t *layout, unsigned narenas, unsigned nshards_max);
 
 /*
  * Build the pool set.  Returns true on error, having emitted a message.  The

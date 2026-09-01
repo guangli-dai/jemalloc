@@ -18,4 +18,12 @@ extern void hpa_pool_build_route_table(hpa_pool_set_t *set);
  */
 extern void hpa_pool_layout_clamp(hpa_pool_layout_t *layout);
 
+/*
+ * And the validator, for the same reason: it is the only thing standing
+ * between a mistyped MALLOC_CONF and a routing table with a hole in it, and a
+ * hole is correctness-preserving -- those sizes just go to the PAC -- so
+ * nothing else would notice.
+ */
+extern bool hpa_pool_layout_validate(const hpa_pool_layout_t *layout);
+
 #endif /* TEST_HPA_POOL_H */

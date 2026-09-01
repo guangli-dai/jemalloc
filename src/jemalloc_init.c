@@ -588,8 +588,32 @@ malloc_init_hard(void) {
 		hpa_shard_opts_t hpa_shard_opts = opt_hpa_opts;
 		hpa_shard_opts.deferral_allowed = background_thread_enabled();
 
+		/*
+		 * opt_hpa_shard_pools is the feature switch.  Off -- the
+		 * default -- means the identity layout: one pool over every
+		 * size, one shard per arena, picked by arena index, i.e. the
+		 * pre-pool topology.  Configured bands and pickers are ignored
+		 * rather than partially honoured, so that turning the switch
+		 * off is a single well-defined behaviour regardless of what
+		 * else is in MALLOC_CONF.
+		 */
 		hpa_pool_layout_t layout;
-		hpa_pool_layout_identity(&layout, narenas_total_get());
+		unsigned nshards_max = (unsigned)opt_hpa_pool_nshards_max;
+		if (opt_hpa_shard_pools && opt_hpa_pool_layout.npools > 0) {
+			layout = opt_hpa_pool_layout;
+		} else {
+			hpa_pool_layout_identity(&layout, narenas_total_get(),
+			    nshards_max);
+			if (opt_hpa_shard_pools) {
+				/*
+				 * Pools on, but no bands given: keep the single
+				 * band and let the picker be the only thing
+				 * that differs from the identity topology.
+				 */
+				layout.pick = opt_hpa_pool_layout.pick;
+			}
+		}
+		layout.nshards_max = nshards_max;
 
 		if (hpa_pools_boot(tsd_tsdn(tsd), &hpa_pools_global, b0get(),
 		        &arena_pa_central_get()->hpa, &arena_emap_global,

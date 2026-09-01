@@ -100,6 +100,15 @@ setup_arena(void) {
 		return false;
 	}
 	/*
+	 * Everything below measures one shard's pageslab count, which only
+	 * means anything if this arena's allocations all land on that shard.
+	 * Under a spreading picker they do not, and two allocations that
+	 * would have packed into one pageslab land in two.
+	 */
+	if (!hpa_pools_shard_is_stable()) {
+		return false;
+	}
+	/*
 	 * Shards already spoken for: arena 0's, plus any an earlier test case
 	 * in this process used.  An earlier case leaves a retained empty
 	 * pageslab behind, and reusing that shard would make the next case

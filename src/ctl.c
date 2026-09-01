@@ -146,6 +146,9 @@ CTL_PROTO(opt_hpa_dirty_mult)
 CTL_PROTO(opt_hpa_sec_nshards)
 CTL_PROTO(opt_hpa_sec_max_alloc)
 CTL_PROTO(opt_hpa_sec_max_bytes)
+CTL_PROTO(opt_hpa_shard_pools)
+CTL_PROTO(opt_hpa_pool_nshards_max)
+CTL_PROTO(opt_hpa_pool_pick)
 CTL_PROTO(opt_experimental_pac_sec_nshards)
 CTL_PROTO(opt_experimental_pac_sec_max_alloc)
 CTL_PROTO(opt_experimental_pac_sec_max_bytes)
@@ -213,6 +216,8 @@ CTL_PROTO(arena_i_initialized)
 CTL_PROTO(arena_i_decay)
 CTL_PROTO(arena_i_purge)
 CTL_PROTO(hpa_purge)
+CTL_PROTO(hpa_npools)
+CTL_PROTO(hpa_nshards)
 CTL_PROTO(arena_i_reset)
 CTL_PROTO(arena_i_destroy)
 CTL_PROTO(arena_i_dss)
@@ -525,6 +530,9 @@ static const ctl_named_node_t opt_node[] = {{NAME("abort"), CTL(opt_abort)},
     {NAME("hpa_sec_nshards"), CTL(opt_hpa_sec_nshards)},
     {NAME("hpa_sec_max_alloc"), CTL(opt_hpa_sec_max_alloc)},
     {NAME("hpa_sec_max_bytes"), CTL(opt_hpa_sec_max_bytes)},
+    {NAME("hpa_shard_pools"), CTL(opt_hpa_shard_pools)},
+    {NAME("hpa_pool_nshards_max"), CTL(opt_hpa_pool_nshards_max)},
+    {NAME("hpa_pool_pick"), CTL(opt_hpa_pool_pick)},
     {NAME("experimental_pac_sec_nshards"),
         CTL(opt_experimental_pac_sec_nshards)},
     {NAME("experimental_pac_sec_max_alloc"),
@@ -631,8 +639,8 @@ static const ctl_indexed_node_t arenas_lextent_node[] = {
  * child: an HPA shard serves every arena that routes to its pool, so no arena
  * can act on one, and arena.<i>.* no longer tries to.
  */
-static const ctl_named_node_t hpa_node[] = {
-    {NAME("purge"), CTL(hpa_purge)}};
+static const ctl_named_node_t hpa_node[] = {{NAME("purge"), CTL(hpa_purge)},
+    {NAME("npools"), CTL(hpa_npools)}, {NAME("nshards"), CTL(hpa_nshards)}};
 
 static const ctl_named_node_t arenas_node[] = {
     {NAME("narenas"), CTL(arenas_narenas)},
@@ -1473,10 +1481,17 @@ ctl_refresh(tsdn_t *tsdn) {
 		 * resident.  It used to arrive via each arena's own shard;
 		 * dropping it when the shards moved would have quietly
 		 * under-reported memory, which no test would have caught.
+		 *
+		 * Take it out of the merge above rather than sampling the
+		 * pssets a second time.  The merge reads each shard under its
+		 * own mutex; a second pass would read them unlocked and at a
+		 * later instant, so stats.resident could disagree with
+		 * stats.hpa.psset_stats.merged.ndirty from the same refresh.
 		 */
 		memset(&ctl_stats->hpastats, 0, sizeof(ctl_stats->hpastats));
 		hpa_pools_stats_merge(tsdn, &ctl_stats->hpastats);
-		size_t hpa_ndirty = hpa_pools_ndirty();
+		size_t hpa_ndirty
+		    = ctl_stats->hpastats.psset_stats.merged.ndirty;
 		ctl_sarena->astats->astats.resident += (hpa_ndirty << LG_PAGE);
 		ctl_sarena->pdirty += hpa_ndirty;
 
@@ -1536,6 +1551,24 @@ ctl_refresh(tsdn_t *tsdn) {
 		    &ctl_stats->mutex_prof_data[global_prof_mutex_ctl],
 		    &ctl_mtx);
 #undef READ_GLOBAL_MUTEX_PROF_DATA
+
+		/*
+		 * The HPA locks are summed rather than read, since there is one
+		 * set per shard.  Zero first: unlike the singletons above,
+		 * accumulating into last epoch's figures would double-count.
+		 */
+		memset(&ctl_stats->mutex_prof_data[global_prof_mutex_hpa_shard],
+		    0, sizeof(mutex_prof_data_t));
+		memset(&ctl_stats
+		           ->mutex_prof_data[global_prof_mutex_hpa_shard_grow],
+		    0, sizeof(mutex_prof_data_t));
+		memset(&ctl_stats->mutex_prof_data[global_prof_mutex_hpa_sec],
+		    0, sizeof(mutex_prof_data_t));
+		hpa_pools_mtx_stats_read(tsdn,
+		    &ctl_stats->mutex_prof_data[global_prof_mutex_hpa_shard],
+		    &ctl_stats
+		         ->mutex_prof_data[global_prof_mutex_hpa_shard_grow],
+		    &ctl_stats->mutex_prof_data[global_prof_mutex_hpa_sec]);
 	}
 	ctl_arenas->epoch++;
 }
@@ -2276,6 +2309,13 @@ CTL_RO_NL_GEN(opt_hpa_slab_max_alloc, opt_hpa_opts.slab_max_alloc, size_t)
 CTL_RO_NL_GEN(opt_hpa_sec_nshards, opt_hpa_sec_opts.nshards, size_t)
 CTL_RO_NL_GEN(opt_hpa_sec_max_alloc, opt_hpa_sec_opts.max_alloc, size_t)
 CTL_RO_NL_GEN(opt_hpa_sec_max_bytes, opt_hpa_sec_opts.max_bytes, size_t)
+
+/* HPA pool options */
+CTL_RO_NL_GEN(opt_hpa_shard_pools, opt_hpa_shard_pools, bool)
+CTL_RO_NL_GEN(
+    opt_hpa_pool_nshards_max, opt_hpa_pool_nshards_max, size_t)
+CTL_RO_NL_GEN(opt_hpa_pool_pick,
+    hpa_pool_pick_names[opt_hpa_pool_layout.pick], const char *)
 CTL_RO_NL_GEN(opt_experimental_pac_sec_nshards,
     opt_pac_sec_opts.nshards, size_t)
 CTL_RO_NL_GEN(opt_experimental_pac_sec_max_alloc,
@@ -2846,6 +2886,15 @@ hpa_purge_ctl(tsd_t *tsd, const size_t *mib, size_t miblen, void *oldp,
 	}
 	return ret;
 }
+
+/*
+ * The topology that was actually built, as opposed to the one that was asked
+ * for.  These differ whenever the clamp fires or the feature switch is off, and
+ * a configuration whose fan-out was silently scaled down is exactly the kind of
+ * thing that gets mistaken for a tuning result.
+ */
+CTL_RO_NL_GEN(hpa_npools, hpa_pools_global.npools, unsigned)
+CTL_RO_NL_GEN(hpa_nshards, hpa_pools_global.nshards_total, unsigned)
 
 static int
 arena_i_reset_ctl(tsd_t *tsd, const size_t *mib, size_t miblen, void *oldp,
@@ -3987,6 +4036,7 @@ stats_mutexes_reset_ctl(tsd_t *tsd, const size_t *mib, size_t miblen,
 	if (have_background_thread) {
 		MUTEX_PROF_RESET(background_thread_lock);
 	}
+	hpa_pools_mtx_prof_reset(tsdn);
 	if (config_prof && opt_prof) {
 		MUTEX_PROF_RESET(bt2gctx_mtx);
 		MUTEX_PROF_RESET(tdatas_mtx);

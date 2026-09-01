@@ -7,15 +7,54 @@
 const char *const hpa_pool_pick_names[] = {"arena", "roundrobin"};
 
 void
-hpa_pool_layout_identity(hpa_pool_layout_t *layout, unsigned narenas) {
+hpa_pool_layout_identity(hpa_pool_layout_t *layout, unsigned narenas,
+    unsigned nshards_max) {
 	assert(narenas > 0);
-	memset(layout, 0, sizeof(*layout));
+	assert(nshards_max > 0);
+	hpa_pool_layout_init(layout);
+	layout->nshards_max = nshards_max;
 	layout->npools = 1;
 	layout->pools[0].size_max = HUGEPAGE;
-	layout->pools[0].nshards = narenas < HPA_IDENTITY_MAX_SHARDS
-	    ? narenas
-	    : HPA_IDENTITY_MAX_SHARDS;
+	/*
+	 * Apply the cap here rather than leaving it to the clamp.  narenas is
+	 * not a request for shards -- on a large machine it is 705 by
+	 * accident -- so scaling it down is ordinary, and the clamp announces
+	 * itself on stderr.  A default configuration should not warn about a
+	 * number nobody chose.
+	 */
+	layout->pools[0].nshards = narenas < nshards_max ? narenas
+	                                                 : nshards_max;
+}
+
+void
+hpa_pool_layout_init(hpa_pool_layout_t *layout) {
+	memset(layout, 0, sizeof(*layout));
 	layout->pick = hpa_pool_pick_arena;
+	layout->nshards_max = HPA_POOL_NSHARDS_MAX_DEFAULT;
+}
+
+bool
+hpa_pool_layout_add(hpa_pool_layout_t *layout, size_t size_start,
+    size_t size_end, unsigned nshards) {
+	if (layout->npools == HPA_MAX_POOLS) {
+		return true;
+	}
+	/*
+	 * Bands must tile [PAGE, HUGEPAGE] exactly.  Checking abutment here
+	 * catches a gap at the point it is written; hpa_pools_boot() re-checks
+	 * the whole layout, since it also has to reject one that never reaches
+	 * HUGEPAGE.
+	 */
+	size_t expect_start = (layout->npools == 0)
+	    ? PAGE
+	    : layout->pools[layout->npools - 1].size_max + 1;
+	if (size_start != expect_start || size_end < size_start) {
+		return true;
+	}
+	layout->pools[layout->npools].size_max = size_end;
+	layout->pools[layout->npools].nshards = nshards;
+	layout->npools++;
+	return false;
 }
 
 /*
@@ -25,11 +64,26 @@ hpa_pool_layout_identity(hpa_pool_layout_t *layout, unsigned narenas) {
  * function over [PAGE, HUGEPAGE] is, because the router would then have sizes
  * with no pool and pa_alloc() would silently fall through to the PAC.
  */
-static bool
+JET_EXTERN bool
 hpa_pool_layout_validate(const hpa_pool_layout_t *layout) {
 	if (layout->npools == 0 || layout->npools > HPA_MAX_POOLS) {
 		malloc_printf("<jemalloc>: hpa pools: npools %u out of range "
 		    "(1..%u)\n", layout->npools, (unsigned)HPA_MAX_POOLS);
+		return true;
+	}
+	/*
+	 * Every pool needs at least one shard, so the total cap has to leave
+	 * room for one each.  Rejecting rather than quietly dropping pools:
+	 * a pool that vanished would send its size band to whichever pool
+	 * inherited the band, which is a routing change the caller did not ask
+	 * for and would have no way to notice.
+	 */
+	if (layout->nshards_max < layout->npools
+	    || layout->nshards_max > HPA_MAX_SHARDS_TOTAL) {
+		malloc_printf("<jemalloc>: hpa pools: nshards_max %u out of "
+		    "range (%u..%u); it must leave at least one shard per "
+		    "pool\n", layout->nshards_max, layout->npools,
+		    (unsigned)HPA_MAX_SHARDS_TOTAL);
 		return true;
 	}
 	if (layout->pick >= hpa_pool_pick_limit) {
@@ -91,9 +145,13 @@ hpa_pool_layout_validate(const hpa_pool_layout_t *layout) {
 }
 
 /*
- * Total shards is bounded by what fits in an extent's owner field.  Scale the
- * layout down proportionally rather than refusing to boot, but say so: a
- * silently smaller fan-out than asked for is the kind of thing that gets
+ * Total shards is bounded twice: by layout->nshards_max, which is a tuning
+ * choice, and by HPA_MAX_SHARDS_TOTAL, which is what fits in an extent's owner
+ * field and is therefore not negotiable.  validate() has already established
+ * the former is no larger than the latter.
+ *
+ * Scale the layout down proportionally rather than refusing to boot, but say
+ * so: a silently smaller fan-out than asked for is the kind of thing that gets
  * mistaken for a tuning result.
  */
 JET_EXTERN void
@@ -103,11 +161,14 @@ hpa_pool_layout_clamp(hpa_pool_layout_t *layout) {
 	 * to HPA_MAX_POOLS of them still must not wrap, or an over-large
 	 * request could masquerade as a small one and skip clamping entirely.
 	 */
+	unsigned limit = layout->nshards_max;
+	assert(limit >= layout->npools && limit <= HPA_MAX_SHARDS_TOTAL);
+
 	uint64_t requested = 0;
 	for (unsigned i = 0; i < layout->npools; i++) {
 		requested += layout->pools[i].nshards;
 	}
-	if (requested <= HPA_MAX_SHARDS_TOTAL) {
+	if (requested <= limit) {
 		return;
 	}
 
@@ -124,14 +185,14 @@ hpa_pool_layout_clamp(hpa_pool_layout_t *layout) {
 	 * Reserving one shard for each pool still to come keeps every pool
 	 * non-empty while making the total impossible to exceed.
 	 */
-	unsigned remaining = HPA_MAX_SHARDS_TOTAL;
+	unsigned remaining = limit;
 	unsigned total = 0;
 	for (unsigned i = 0; i < layout->npools; i++) {
 		unsigned pools_after = layout->npools - i - 1;
 		assert(remaining > pools_after);
 		unsigned budget = remaining - pools_after;
 		unsigned scaled = (unsigned)(((uint64_t)layout->pools[i].nshards
-		    * HPA_MAX_SHARDS_TOTAL) / requested);
+		    * limit) / requested);
 		if (scaled == 0) {
 			scaled = 1;
 		}
@@ -142,11 +203,10 @@ hpa_pool_layout_clamp(hpa_pool_layout_t *layout) {
 		remaining -= scaled;
 		total += scaled;
 	}
-	assert(total <= HPA_MAX_SHARDS_TOTAL);
+	assert(total <= limit);
 
 	malloc_printf("<jemalloc>: hpa pools: requested %" FMTu64 " shards, "
-	    "clamped to %u (limit %u, set by the extent owner field width)\n",
-	    requested, total, (unsigned)HPA_MAX_SHARDS_TOTAL);
+	    "clamped to %u (limit %u)\n", requested, total, limit);
 }
 
 /*
@@ -437,20 +497,52 @@ hpa_pools_stats_merge(tsdn_t *tsdn, hpa_shard_stats_t *dst) {
 }
 
 /*
- * Dirty pages held across every pool.  Used to keep stats.resident honest:
- * this used to be folded in per arena, and simply dropping it would have
- * under-reported memory with nothing failing to say so.
+ * Mutex contention, summed over every shard.
+ *
+ * These used to be arena figures, which worked only because a shard belonged
+ * to exactly one arena.  Now that one shard is contended by every arena
+ * routing to its pool, an arena has nothing to say about them -- and these are
+ * the locks that matter most for the whole exercise, since concentrating
+ * traffic into fewer, larger pssets is precisely what trades packing against
+ * contention.
  */
-size_t
-hpa_pools_ndirty(void) {
+void
+hpa_pools_mtx_stats_read(tsdn_t *tsdn, mutex_prof_data_t *shard_data,
+    mutex_prof_data_t *grow_data, mutex_prof_data_t *sec_data) {
 	if (!hpa_pools_ready()) {
-		return 0;
+		return;
 	}
-	size_t ndirty = 0;
 	for (unsigned i = 0; i < hpa_pools_global.nshards_total; i++) {
-		ndirty += psset_ndirty(&hpa_pools_global.shards[i].psset);
+		hpa_shard_t *shard = &hpa_pools_global.shards[i];
+
+		malloc_mutex_lock(tsdn, &shard->grow_mtx);
+		malloc_mutex_prof_accum(tsdn, grow_data, &shard->grow_mtx);
+		malloc_mutex_unlock(tsdn, &shard->grow_mtx);
+
+		malloc_mutex_lock(tsdn, &shard->mtx);
+		malloc_mutex_prof_accum(tsdn, shard_data, &shard->mtx);
+		malloc_mutex_unlock(tsdn, &shard->mtx);
+
+		sec_mutex_stats_read(tsdn, &shard->sec, sec_data);
 	}
-	return ndirty;
+}
+
+void
+hpa_pools_mtx_prof_reset(tsdn_t *tsdn) {
+	if (!hpa_pools_ready()) {
+		return;
+	}
+	for (unsigned i = 0; i < hpa_pools_global.nshards_total; i++) {
+		hpa_shard_t *shard = &hpa_pools_global.shards[i];
+
+		malloc_mutex_lock(tsdn, &shard->grow_mtx);
+		malloc_mutex_prof_data_reset(tsdn, &shard->grow_mtx);
+		malloc_mutex_unlock(tsdn, &shard->grow_mtx);
+
+		malloc_mutex_lock(tsdn, &shard->mtx);
+		malloc_mutex_prof_data_reset(tsdn, &shard->mtx);
+		malloc_mutex_unlock(tsdn, &shard->mtx);
+	}
 }
 
 void

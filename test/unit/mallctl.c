@@ -1,5 +1,7 @@
 #include "test/jemalloc_test.h"
 
+#include "jemalloc/internal/hpa_pool.h"
+
 #include "jemalloc/internal/ctl.h"
 #include "jemalloc/internal/arena.h"
 #include "jemalloc/internal/util.h"
@@ -535,6 +537,9 @@ TEST_BEGIN(test_mallctl_opt) {
 	TEST_MALLCTL_OPT(size_t, hpa_purge_threshold, always);
 	TEST_MALLCTL_OPT(uint64_t, hpa_min_purge_delay_ms, always);
 	TEST_MALLCTL_OPT(const char *, hpa_hugify_style, always);
+	TEST_MALLCTL_OPT(bool, hpa_shard_pools, always);
+	TEST_MALLCTL_OPT(size_t, hpa_pool_nshards_max, always);
+	TEST_MALLCTL_OPT(const char *, hpa_pool_pick, always);
 	TEST_MALLCTL_OPT(unsigned, narenas, always);
 	TEST_MALLCTL_OPT(const char *, percpu_arena, always);
 	TEST_MALLCTL_OPT(size_t, oversize_threshold, always);
@@ -2086,6 +2091,33 @@ TEST_BEGIN(test_stats_arenas) {
 }
 TEST_END
 
+TEST_BEGIN(test_hpa_topology) {
+	/*
+	 * What was actually built, as opposed to what was configured.  Worth
+	 * its own nodes because the two diverge silently: the feature switch
+	 * being off, or the shard-count clamp firing, both leave a process
+	 * running a topology nobody asked for.
+	 */
+	unsigned npools, nshards;
+	size_t   sz = sizeof(npools);
+	expect_d_eq(mallctl("hpa.npools", &npools, &sz, NULL, 0), 0,
+	    "hpa.npools should be readable");
+	sz = sizeof(nshards);
+	expect_d_eq(mallctl("hpa.nshards", &nshards, &sz, NULL, 0), 0,
+	    "hpa.nshards should be readable");
+
+	if (!opt_hpa) {
+		expect_u_eq(npools, 0, "no pools should exist without the HPA");
+		expect_u_eq(nshards, 0, "no shards should exist without it");
+		return;
+	}
+	expect_u_gt(npools, 0, "the HPA is on but has no pools");
+	expect_u_ge(nshards, npools, "every pool needs at least one shard");
+	expect_u_le(nshards, HPA_MAX_SHARDS_TOTAL,
+	    "more shards than an extent's owner field can address");
+}
+TEST_END
+
 TEST_BEGIN(test_stats_arenas_hpa_shard_counters) {
 	test_skip_if(!config_stats);
 
@@ -2349,7 +2381,8 @@ main(void) {
 	    test_arena_i_reset_destroy_errors, test_thread_prof_name_errors,
 	    test_ctl_ro_macro_errors,
 	    test_arena_i_dirty_decay_ms, test_arena_i_muzzy_decay_ms,
-	    test_arena_i_purge, test_hpa_purge, test_arena_i_decay,
+	    test_arena_i_purge, test_hpa_purge, test_hpa_topology,
+	    test_arena_i_decay,
 	    test_arena_i_dss,
 	    test_arena_i_name, test_arena_i_retain_grow_limit,
 	    test_arenas_dirty_decay_ms, test_arenas_muzzy_decay_ms,

@@ -263,7 +263,8 @@ initialize_pa_infrastructure(int num_shards) {
 	}
 
 	hpa_pool_layout_t layout;
-	hpa_pool_layout_identity(&layout, (unsigned)num_shards);
+	hpa_pool_layout_identity(&layout, (unsigned)num_shards,
+	    (unsigned)num_shards);
 	if (hpa_pools_boot(tsd_tsdn(tsd_fetch()), &hpa_pools_global,
 	        g_shard_infra[0].base, &g_pa_central.hpa,
 	        &jet_arena_emap_global, &g_hpa_edata_cache, &layout, &hpa_opts,

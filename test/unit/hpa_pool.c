@@ -210,7 +210,7 @@ TEST_BEGIN(test_pick_arena_is_identity) {
 	hpa_pool_set_t    set;
 	hpa_pool_layout_t layout;
 	unsigned          narenas = 10;
-	hpa_pool_layout_identity(&layout, narenas);
+	hpa_pool_layout_identity(&layout, narenas, HPA_MAX_SHARDS_TOTAL);
 
 	expect_u_eq(layout.npools, 1, "identity layout should have one pool");
 	expect_zu_eq(layout.pools[0].size_max, HUGEPAGE,
@@ -293,21 +293,34 @@ TEST_BEGIN(test_layout_clamp_respects_the_limit) {
 	 */
 	struct {
 		const char *name;
+		unsigned    nshards_max;
 		unsigned    npools;
 		unsigned    nshards[HPA_MAX_POOLS];
 	} cases[] = {
-	    {"under the limit, untouched", 3, {4, 2, 1}},
-	    {"uniform, over the limit", 8,
+	    {"under the limit, untouched", HPA_MAX_SHARDS_TOTAL, 3, {4, 2, 1}},
+	    {"uniform, over the limit", HPA_MAX_SHARDS_TOTAL, 8,
 	        {4095, 4095, 4095, 4095, 4095, 4095, 4095, 4095}},
-	    {"one huge beside seven tiny", 8, {1, 1, 1, 1, 1, 1, 1, 4095}},
-	    {"one huge beside seven tiny, far over", 8,
+	    {"one huge beside seven tiny", HPA_MAX_SHARDS_TOTAL, 8,
+	        {1, 1, 1, 1, 1, 1, 1, 4095}},
+	    {"one huge beside seven tiny, far over", HPA_MAX_SHARDS_TOTAL, 8,
 	        {1, 1, 1, 1, 1, 1, 1, 4096}},
-	    {"single pool at the limit", 1, {4096}},
+	    {"single pool at the limit", HPA_MAX_SHARDS_TOTAL, 1, {4096}},
+	    /*
+	     * The tunable limit is the one that actually bites in practice:
+	     * opt_hpa_pool_nshards_max defaults to 64, far below the field
+	     * width, so these are the shapes a real configuration hits.
+	     */
+	    {"tunable limit, identity-shaped", 64, 1, {704}},
+	    {"tunable limit, one huge beside seven tiny", 64, 8,
+	        {1, 1, 1, 1, 1, 1, 1, 704}},
+	    /* The tightest legal cap: exactly one shard per pool. */
+	    {"tunable limit equal to npools", 4, 4, {8, 8, 8, 8}},
 	};
 
 	for (unsigned c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
 		hpa_pool_layout_t layout;
-		memset(&layout, 0, sizeof(layout));
+		hpa_pool_layout_init(&layout);
+		layout.nshards_max = cases[c].nshards_max;
 		layout.npools = cases[c].npools;
 		unsigned before = 0;
 		for (unsigned i = 0; i < layout.npools; i++) {
@@ -325,10 +338,10 @@ TEST_BEGIN(test_layout_clamp_respects_the_limit) {
 			    cases[c].name, i);
 			after += layout.pools[i].nshards;
 		}
-		expect_u_le(after, HPA_MAX_SHARDS_TOTAL,
+		expect_u_le(after, cases[c].nshards_max,
 		    "%s: clamped to %u shards, past the %u limit",
-		    cases[c].name, after, (unsigned)HPA_MAX_SHARDS_TOTAL);
-		if (before <= HPA_MAX_SHARDS_TOTAL) {
+		    cases[c].name, after, cases[c].nshards_max);
+		if (before <= cases[c].nshards_max) {
 			expect_u_eq(after, before,
 			    "%s: a layout within the limit should be left "
 			    "alone", cases[c].name);
@@ -337,9 +350,176 @@ TEST_BEGIN(test_layout_clamp_respects_the_limit) {
 }
 TEST_END
 
+TEST_BEGIN(test_layout_add_tiles_or_rejects) {
+	/*
+	 * hpa_pool_layout_add() is what the MALLOC_CONF parser drives, one
+	 * band at a time.  Its whole job is to make a malformed band fail
+	 * where it is written: bands must tile [PAGE, HUGEPAGE] exactly, and a
+	 * gap is the dangerous case, because sizes in the gap would route to
+	 * whichever pool inherited them (or, if the gap is at the top, fall
+	 * through to the PAC) with nothing failing to say so.
+	 */
+	hpa_pool_layout_t layout;
+
+	/* A well-formed three-band tiling. */
+	hpa_pool_layout_init(&layout);
+	expect_false(hpa_pool_layout_add(&layout, PAGE, POOL_SMALL_MAX, 4),
+	    "first band should be accepted");
+	expect_false(hpa_pool_layout_add(&layout, POOL_SMALL_MAX + 1,
+	                 POOL_MED_MAX, 2),
+	    "abutting band should be accepted");
+	expect_false(
+	    hpa_pool_layout_add(&layout, POOL_MED_MAX + 1, HUGEPAGE, 1),
+	    "final band should be accepted");
+	expect_u_eq(layout.npools, 3, "should have built three pools");
+	expect_false(hpa_pool_layout_validate(&layout),
+	    "a tiling of [PAGE, HUGEPAGE] should validate");
+
+	/* First band must start at PAGE. */
+	hpa_pool_layout_init(&layout);
+	expect_true(hpa_pool_layout_add(&layout, 2 * PAGE, HUGEPAGE, 1),
+	    "a first band starting above PAGE should be rejected");
+
+	/* Gap between bands. */
+	hpa_pool_layout_init(&layout);
+	expect_false(hpa_pool_layout_add(&layout, PAGE, POOL_SMALL_MAX, 1),
+	    "first band should be accepted");
+	expect_true(hpa_pool_layout_add(&layout, POOL_SMALL_MAX + 2,
+	                POOL_MED_MAX, 1),
+	    "a band leaving a gap should be rejected");
+
+	/* Overlap with the previous band. */
+	hpa_pool_layout_init(&layout);
+	expect_false(hpa_pool_layout_add(&layout, PAGE, POOL_MED_MAX, 1),
+	    "first band should be accepted");
+	expect_true(
+	    hpa_pool_layout_add(&layout, POOL_SMALL_MAX, HUGEPAGE, 1),
+	    "an overlapping band should be rejected");
+
+	/* Backwards band. */
+	hpa_pool_layout_init(&layout);
+	expect_true(hpa_pool_layout_add(&layout, PAGE, PAGE / 2, 1),
+	    "a band whose end precedes its start should be rejected");
+
+	/*
+	 * More bands than the set can hold.  Each band here is one page wide
+	 * and abuts the last, so the only thing wrong with the final add is
+	 * that there is nowhere to put it.
+	 */
+	hpa_pool_layout_init(&layout);
+	for (unsigned i = 0; i < HPA_MAX_POOLS; i++) {
+		size_t start = (i == 0) ? PAGE : i * PAGE + 1;
+		expect_false(
+		    hpa_pool_layout_add(&layout, start, (i + 1) * PAGE, 1),
+		    "band %u should fit", i);
+	}
+	expect_true(hpa_pool_layout_add(&layout, HPA_MAX_POOLS * PAGE + 1,
+	                HUGEPAGE, 1),
+	    "a band past HPA_MAX_POOLS should be rejected");
+}
+TEST_END
+
+TEST_BEGIN(test_layout_validate_rejects) {
+	/*
+	 * What add() cannot catch on its own: properties of the layout as a
+	 * whole.  These are the configurations that would boot into a router
+	 * that is quietly wrong rather than one that refuses.
+	 */
+	hpa_pool_layout_t layout;
+
+	/* Does not reach HUGEPAGE: the top of the range has no pool. */
+	hpa_pool_layout_init(&layout);
+	expect_false(
+	    hpa_pool_layout_add(&layout, PAGE, HUGEPAGE / 2, 1), "");
+	expect_true(hpa_pool_layout_validate(&layout),
+	    "a layout that stops short of HUGEPAGE should be rejected");
+
+	/* Past HUGEPAGE: describes extents the HPA will never serve. */
+	hpa_pool_layout_init(&layout);
+	expect_false(
+	    hpa_pool_layout_add(&layout, PAGE, 2 * HUGEPAGE, 1), "");
+	expect_true(hpa_pool_layout_validate(&layout),
+	    "a band above HUGEPAGE should be rejected");
+
+	/* Not page-aligned. */
+	hpa_pool_layout_init(&layout);
+	expect_false(
+	    hpa_pool_layout_add(&layout, PAGE, HUGEPAGE - 1, 1), "");
+	expect_true(hpa_pool_layout_validate(&layout),
+	    "an unaligned band bound should be rejected");
+
+	/* A pool with no shards. */
+	hpa_pool_layout_init(&layout);
+	expect_false(hpa_pool_layout_add(&layout, PAGE, HUGEPAGE, 0), "");
+	expect_true(hpa_pool_layout_validate(&layout),
+	    "a pool with no shards should be rejected");
+
+	/* No pools at all. */
+	hpa_pool_layout_init(&layout);
+	expect_true(hpa_pool_layout_validate(&layout),
+	    "an empty layout should be rejected");
+
+	/*
+	 * A cap too small to give every pool a shard.  Clamping instead would
+	 * have to delete a pool, which silently rewrites the routing the
+	 * caller asked for.
+	 */
+	hpa_pool_layout_init(&layout);
+	expect_false(
+	    hpa_pool_layout_add(&layout, PAGE, POOL_SMALL_MAX, 1), "");
+	expect_false(
+	    hpa_pool_layout_add(&layout, POOL_SMALL_MAX + 1, HUGEPAGE, 1), "");
+	layout.nshards_max = 1;
+	expect_true(hpa_pool_layout_validate(&layout),
+	    "nshards_max below npools should be rejected");
+	layout.nshards_max = 2;
+	expect_false(hpa_pool_layout_validate(&layout),
+	    "nshards_max equal to npools is the tightest legal cap");
+
+	/* A cap above what an extent's owner field can address. */
+	layout.nshards_max = HPA_MAX_SHARDS_TOTAL + 1;
+	expect_true(hpa_pool_layout_validate(&layout),
+	    "nshards_max above the owner field width should be rejected");
+}
+TEST_END
+
+TEST_BEGIN(test_layout_identity_is_one_band) {
+	/*
+	 * The rollback switch selects this, so it has to be exactly the
+	 * pre-pool topology: one band over everything, one shard per arena,
+	 * picked by arena index.  The cap is applied by the clamp rather than
+	 * here, so that "asked for" and "got" stay distinguishable.
+	 */
+	hpa_pool_layout_t layout;
+	hpa_pool_layout_identity(&layout, 8, HPA_POOL_NSHARDS_MAX_DEFAULT);
+	expect_u_eq(layout.npools, 1, "identity should be a single band");
+	expect_zu_eq(layout.pools[0].size_max, HUGEPAGE, "band should span all");
+	expect_u_eq(layout.pools[0].nshards, 8, "one shard per arena");
+	expect_d_eq((int)layout.pick, (int)hpa_pool_pick_arena, "by arena");
+	expect_u_eq(layout.nshards_max, HPA_POOL_NSHARDS_MAX_DEFAULT,
+	    "identity should carry the cap it was given");
+	expect_false(hpa_pool_layout_validate(&layout),
+	    "the identity layout must always validate");
+
+	/*
+	 * Above the cap, arenas share shards -- and identity applies the cap
+	 * itself rather than leaving it to the clamp, because narenas is not
+	 * a number anyone asked for and the clamp announces itself on stderr.
+	 */
+	hpa_pool_layout_identity(&layout, 704, HPA_POOL_NSHARDS_MAX_DEFAULT);
+	expect_u_eq(layout.pools[0].nshards, HPA_POOL_NSHARDS_MAX_DEFAULT,
+	    "the cap should be what bounds a large narenas");
+	hpa_pool_layout_clamp(&layout);
+	expect_u_eq(layout.pools[0].nshards, HPA_POOL_NSHARDS_MAX_DEFAULT,
+	    "the clamp should have nothing left to do");
+}
+TEST_END
+
 int
 main(void) {
 	return test_no_reentrancy(test_layout_clamp_respects_the_limit,
+	    test_layout_add_tiles_or_rejects, test_layout_validate_rejects,
+	    test_layout_identity_is_one_band,
 	    test_route_table_totality,
 	    test_route_table_matches_linear_scan, test_route_is_monotonic,
 	    test_route_boundaries_are_exact, test_pick_stays_within_pool,

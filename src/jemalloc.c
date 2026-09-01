@@ -1,5 +1,7 @@
 #include "jemalloc/internal/jemalloc_preamble.h"
 
+#include "jemalloc/internal/hpa_pool.h"
+
 #include "jemalloc/internal/arena.h"
 #include "jemalloc/internal/arenas_management.h"
 #include "jemalloc/internal/assert.h"
@@ -196,6 +198,19 @@ size_t opt_calloc_madvise_threshold = CALLOC_MADVISE_THRESHOLD_DEFAULT;
 
 /* The global hpa, and whether it's on. */
 bool             opt_hpa = false;
+
+/*
+ * Whether HPA shards are pooled by size rather than laid out one per arena.
+ *
+ * Defaults to false, which builds the identity layout -- one pool spanning
+ * every size, one shard per arena, picked by arena index -- i.e. the
+ * pre-pool topology.  This is the feature's off switch: rollout is opt-in,
+ * and rollback in production is a MALLOC_CONF edit rather than a binary
+ * revert.  It rolls back routing policy, not the structural refactor.
+ */
+bool              opt_hpa_shard_pools = false;
+hpa_pool_layout_t opt_hpa_pool_layout;
+size_t            opt_hpa_pool_nshards_max = HPA_POOL_NSHARDS_MAX_DEFAULT;
 hpa_shard_opts_t opt_hpa_opts = HPA_SHARD_OPTS_DEFAULT;
 sec_opts_t       opt_hpa_sec_opts = SEC_OPTS_DEFAULT;
 sec_opts_t       opt_pac_sec_opts = {0,

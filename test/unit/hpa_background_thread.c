@@ -13,6 +13,8 @@ TEST_BEGIN(test_hpa_background_thread_a0_initialized) {
 	test_skip_if(!hpa_supported());
 	test_skip_if(!have_background_thread);
 	test_skip_if(san_guard_enabled());
+	/* No pools without the HPA; the rest of this has nothing to check. */
+	test_skip_if(!opt_hpa);
 
 	bool   enabled = false;
 	size_t sz = sizeof(enabled);
@@ -65,8 +67,14 @@ create_arena(void) {
  * Read the shard directly instead; the arena is freshly created and is the
  * only thing driving it.
  */
+/*
+ * Only meaningful under the arena picker: hpa_route() with a spreading picker
+ * returns a different shard each call, so this would sample at random.  The
+ * test cases skip in that case; see hpa_pools_shard_is_stable().
+ */
 static hpa_shard_t *
 test_shard(unsigned arena_ind) {
+	assert(hpa_pools_shard_is_stable());
 	return hpa_route(&hpa_pools_global, PAGE, /* slab */ false, SC_NSIZES,
 	    /* hint */ arena_ind);
 }
@@ -185,6 +193,8 @@ TEST_BEGIN(test_hpa_background_thread_purges) {
 	test_skip_if(!have_background_thread);
 	/* Skip since guarded pages cannot be allocated from hpa. */
 	test_skip_if(san_guard_enabled());
+	/* Measuring one shard needs this arena's work to stay on it. */
+	test_skip_if(!hpa_pools_shard_is_stable());
 
 	unsigned arena_ind = create_arena();
 	/*
@@ -201,6 +211,8 @@ TEST_BEGIN(test_hpa_background_thread_enable_disable) {
 	test_skip_if(!have_background_thread);
 	/* Skip since guarded pages cannot be allocated from hpa. */
 	test_skip_if(san_guard_enabled());
+	/* Measuring one shard needs this arena's work to stay on it. */
+	test_skip_if(!hpa_pools_shard_is_stable());
 
 	unsigned arena_ind = create_arena();
 

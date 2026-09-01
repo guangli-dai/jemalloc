@@ -1,5 +1,7 @@
 #include "jemalloc/internal/jemalloc_preamble.h"
 
+#include "jemalloc/internal/hpa_pool.h"
+
 #include "jemalloc/internal/arena.h"
 #include "jemalloc/internal/assert.h"
 #include "jemalloc/internal/atomic.h"
@@ -917,6 +919,68 @@ malloc_conf_init_helper(sc_data_t *sc_data, unsigned bin_shard_sizes[SC_NBINS],
 					CONF_ERROR("Invalid conf value", k,
 					    klen, v, vlen);
 				}
+				CONF_CONTINUE;
+			}
+
+			CONF_HANDLE_BOOL(opt_hpa_shard_pools,
+			    "hpa_shard_pools")
+			CONF_HANDLE_SIZE_T(opt_hpa_pool_nshards_max,
+			    "hpa_pool_nshards_max", 1, HPA_MAX_SHARDS_TOTAL,
+			    CONF_CHECK_MIN, CONF_CHECK_MAX, false)
+			if (strncmp("hpa_pool_pick", k, klen) == 0) {
+				bool match = false;
+				for (int m = 0; m < hpa_pool_pick_limit; m++) {
+					if (strncmp(hpa_pool_pick_names[m], v,
+					        vlen)
+					    == 0) {
+						opt_hpa_pool_layout.pick = m;
+						match = true;
+						break;
+					}
+				}
+				if (!match) {
+					CONF_ERROR("Invalid conf value", k,
+					    klen, v, vlen);
+				}
+				CONF_CONTINUE;
+			}
+			if (CONF_MATCH("hpa_pools")) {
+				/*
+				 * Same grammar as bin_shards:
+				 *   size_start-size_end:nshards|...
+				 * Bands are extent sizes and must tile
+				 * [PAGE, HUGEPAGE] with no gap -- a hole would
+				 * send those sizes to the PAC instead, which
+				 * is correctness-preserving and silently
+				 * mistuned.
+				 */
+				const char     *seg_cur = v;
+				size_t          vlen_left = vlen;
+				hpa_pool_pick_t pick =
+				    opt_hpa_pool_layout.pick;
+				hpa_pool_layout_init(&opt_hpa_pool_layout);
+				opt_hpa_pool_layout.pick = pick;
+				do {
+					size_t size_start;
+					size_t size_end;
+					size_t nshards;
+					bool   err = multi_setting_parse_next(
+                                            &seg_cur, &vlen_left, &size_start,
+                                            &size_end, &nshards);
+					if (err
+					    || nshards == 0
+					    || nshards > HPA_MAX_SHARDS_TOTAL
+					    || hpa_pool_layout_add(
+					        &opt_hpa_pool_layout,
+					        size_start, size_end,
+					        (unsigned)nshards)) {
+						CONF_ERROR(
+						    "Invalid settings for "
+						    "hpa_pools",
+						    k, klen, v, vlen);
+						break;
+					}
+				} while (vlen_left > 0);
 				CONF_CONTINUE;
 			}
 
