@@ -75,7 +75,8 @@ create_arena(void) {
 static hpa_shard_t *
 test_shard(unsigned arena_ind) {
 	assert(hpa_pools_shard_is_stable());
-	return hpa_route(&hpa_pools_global, PAGE, /* slab */ false, SC_NSIZES,
+	return hpa_route(&hpa_pools_global, PAGE, /* slab */ false,
+	    sz_size2index(PAGE),
 	    /* hint */ arena_ind);
 }
 

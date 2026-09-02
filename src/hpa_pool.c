@@ -49,13 +49,14 @@ hpa_pool_layout_add(hpa_pool_layout_t *layout, size_t size_start,
 		return true;
 	}
 	/*
-	 * Bands must tile [PAGE, HUGEPAGE] exactly.  Checking abutment here
-	 * catches a gap at the point it is written; hpa_pools_boot() re-checks
-	 * the whole layout, since it also has to reject one that never reaches
-	 * HUGEPAGE.
+	 * Bands must tile [1, HUGEPAGE] exactly -- requested sizes, not extent
+	 * sizes, so the domain starts at the smallest size class rather than at
+	 * a page.  Checking abutment here catches a gap at the point it is
+	 * written; hpa_pools_boot() re-checks the whole layout, since it also
+	 * has to reject one that never reaches HUGEPAGE.
 	 */
 	size_t expect_start = (layout->npools == 0)
-	    ? PAGE
+	    ? 1
 	    : layout->pools[layout->npools - 1].size_max + 1;
 	if (size_start != expect_start || size_end < size_start) {
 		return true;
@@ -120,7 +121,7 @@ hpa_pool_opt_parse_bool(const char *val, size_t vallen, bool *result) {
 static hpa_pool_layout_entry_t *
 hpa_pool_layout_find(hpa_pool_layout_t *layout, size_t size_start,
     size_t size_end) {
-	size_t size_min = PAGE;
+	size_t size_min = 1;
 	for (unsigned i = 0; i < layout->npools; i++) {
 		if (size_min == size_start
 		    && layout->pools[i].size_max == size_end) {
@@ -349,11 +350,16 @@ hpa_pool_layout_validate(const hpa_pool_layout_t *layout) {
 			    size_max, prev_max);
 			return true;
 		}
-		if ((size_max & PAGE_MASK) != 0) {
-			malloc_printf("<jemalloc>: hpa pools: pool %u bound "
-			    "%zu is not page-aligned\n", i, size_max);
-			return true;
-		}
+		/*
+		 * No alignment guard here.  Bands are requested sizes, so the
+		 * page-alignment rule that applied to extent bounds is gone,
+		 * and the analogue -- "is this a size-class boundary" -- cannot
+		 * be checked cheaply: sz_index2size() has a narrower domain
+		 * when large size classes are disabled, and calling it on an
+		 * arbitrary configured bound would assert.  A bound falling
+		 * inside a class simply behaves as the top of that class; the
+		 * option documentation says so.
+		 */
 		if (size_max > HUGEPAGE) {
 			malloc_printf("<jemalloc>: hpa pools: pool %u bound "
 			    "%zu exceeds HUGEPAGE %zu\n", i, size_max,
@@ -438,35 +444,49 @@ hpa_pool_layout_clamp(hpa_pool_layout_t *layout) {
 }
 
 /*
- * Fill the size -> pool table.  A page-size class belongs to the first pool
- * whose band reaches it.
+ * Fill the size-class -> pool table.  A class belongs to the first pool whose
+ * band reaches the size that class represents.
  *
- * Routing granularity is therefore the page-size class, not the byte: a
- * boundary that falls strictly inside a class effectively rounds up to the
- * end of it.  Boundaries that are themselves page-size classes -- which the
- * interesting ones (16 KiB, 64 KiB, 1 MiB) all are -- are exact.
+ * Routing granularity is therefore the size class, not the byte: a band
+ * boundary that falls strictly inside a class rounds up to the end of it.
+ * Boundaries that are themselves class boundaries -- which the interesting
+ * ones are -- are exact.
  */
 JET_EXTERN void
 hpa_pool_build_route_table(hpa_pool_set_t *set) {
-	for (unsigned key = 0; key < HPA_ROUTE_NKEYS; key++) {
-		size_t      size = sz_pind2sz(key);
-		hpa_pool_t *found = NULL;
-		for (unsigned i = 0; i < set->npools; i++) {
-			if (size <= set->pools[i].size_max) {
-				found = &set->pools[i];
-				break;
-			}
+	/*
+	 * Walk the bands and paint the class range each one covers, rather
+	 * than walking classes and asking each one its size.
+	 *
+	 * The direction matters.  sz_size2index() is total -- every size has a
+	 * class -- but sz_index2size() is not: with large size classes
+	 * disabled its domain stops at USIZE_GROW_SLOW_THRESHOLD, and above
+	 * that a class index has no size to hand back.  Those classes are
+	 * still handed to the router, because arena_extent_alloc_large()
+	 * computes szind for every large request regardless.  Painting
+	 * forwards from the band bounds needs only the total direction.
+	 *
+	 * A bound that falls strictly inside a class therefore takes the whole
+	 * class -- the boundary behaves as the top of it, which is what the
+	 * option documentation says.
+	 */
+	unsigned next = 0;
+	for (unsigned i = 0; i < set->npools; i++) {
+		szind_t last = sz_size2index(set->pools[i].size_max);
+		assert(last < HPA_ROUTE_NKEYS);
+		for (unsigned key = next; key <= (unsigned)last; key++) {
+			set->pool_by_key[key] = &set->pools[i];
 		}
-		/*
-		 * Keys past HUGEPAGE describe extents the HPA will never be
-		 * asked for; hpa_route_key() asserts size <= HUGEPAGE.  Pin
-		 * them to the last pool anyway so the table has no NULLs to
-		 * trip over.
-		 */
-		if (found == NULL) {
-			found = &set->pools[set->npools - 1];
-		}
-		set->pool_by_key[key] = found;
+		next = (unsigned)last + 1;
+	}
+	/*
+	 * Classes above the last band describe requests the HPA will never be
+	 * asked for -- pa_alloc() gates on the extent size, and an extent is
+	 * never smaller than the usize it serves.  Pin them to the last pool
+	 * so the table has no NULLs to trip over.
+	 */
+	for (unsigned key = next; key < HPA_ROUTE_NKEYS; key++) {
+		set->pool_by_key[key] = &set->pools[set->npools - 1];
 	}
 }
 
@@ -478,12 +498,12 @@ hpa_pools_boot(tsdn_t *tsdn, hpa_pool_set_t *set, base_t *base,
 	assert(!set->initialized);
 	assert(hpa_supported());
 	/*
-	 * The routing table has to span every size the HPA can serve.  This is
-	 * inherited from the psset's own bound, so it should hold by
-	 * construction; check it rather than assume it, because a page-size
+	 * The routing table has to span every size class the HPA can be asked
+	 * for.  It is indexed by szind and sized SC_NSIZES, so this holds by
+	 * construction; assert it rather than assume it, because a size-class
 	 * configuration that broke it would produce silent misrouting.
 	 */
-	assert(sz_psz2ind(HUGEPAGE) < HPA_ROUTE_NKEYS);
+	assert(sz_size2index(HUGEPAGE) < HPA_ROUTE_NKEYS);
 
 	hpa_pool_layout_t local = *layout;
 	if (hpa_pool_layout_validate(&local)) {
@@ -515,7 +535,7 @@ hpa_pools_boot(tsdn_t *tsdn, hpa_pool_set_t *set, base_t *base,
 		return true;
 	}
 
-	size_t   size_min = PAGE;
+	size_t   size_min = 1;
 	unsigned next_shard = 0;
 	for (unsigned i = 0; i < local.npools; i++) {
 		hpa_pool_t *pool = &set->pools[i];

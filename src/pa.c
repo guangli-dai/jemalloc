@@ -138,10 +138,10 @@ pa_alloc(tsdn_t *tsdn, pa_shard_t *shard, size_t size, size_t alignment,
 	 */
 	if (!guarded && size <= HUGEPAGE && pa_shard_uses_hpa(shard)) {
 		/*
-		 * Step 1 picks the pool from the extent size; step 2 lets that
-		 * pool pick one of its own shards.  The arena index is only a
-		 * hint -- with the identity layout and an arena below the
-		 * boot-time shard count it selects shard == arena, which is
+		 * Step 1 picks the pool from the requested size class; step 2
+		 * lets that pool pick one of its own shards.  The arena index
+		 * is only a hint -- with the identity layout and an arena below
+		 * the boot-time shard count it selects shard == arena, which is
 		 * the old topology.
 		 */
 		hpa = hpa_route(&hpa_pools_global, size, slab, szind,

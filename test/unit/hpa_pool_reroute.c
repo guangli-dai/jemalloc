@@ -29,12 +29,12 @@
  * the large path and reach the HPA as the size asked for.
  */
 #if LG_HUGEPAGE == 21 && LG_PAGE == 12
-#define POOLS_CONF "hpa_pools:4096-16384:4|16385-65536:4|65537-2097152:4,"
+#define POOLS_CONF "hpa_pools:1-16384:4|16385-65536:4|65537-2097152:4,"
 #define SIZE_BAND_0 16384
 #define SIZE_BAND_1 65536
 #define SIZE_BAND_2 524288
 #elif LG_HUGEPAGE == 21 && LG_PAGE == 16
-#define POOLS_CONF "hpa_pools:65536-262144:4|262145-1048576:4|1048577-2097152:4,"
+#define POOLS_CONF "hpa_pools:1-262144:4|262145-1048576:4|1048577-2097152:4,"
 #define SIZE_BAND_0 262144
 #define SIZE_BAND_1 524288
 #define SIZE_BAND_2 1572864
@@ -86,7 +86,7 @@ pools_configured(void) {
 static hpa_pool_t *
 pool_of(size_t size) {
 	return hpa_pool_lookup(&hpa_pools_global,
-	    hpa_route_key(size, /* slab */ false, SC_NSIZES));
+	    hpa_route_key(size, /* slab */ false, sz_size2index(size)));
 }
 
 TEST_BEGIN(test_bands_segregate) {

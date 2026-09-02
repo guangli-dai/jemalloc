@@ -2120,7 +2120,9 @@ TEST_BEGIN(test_hpa_topology) {
 	 * Per-pool topology.  Bands must tile [PAGE, HUGEPAGE] with no gap;
 	 * shard slices must not overlap; and the index must stop at npools.
 	 */
-	size_t expect_min = PAGE;
+	/* Bands are requested sizes, so the domain starts at the smallest
+	 * size class rather than at a page. */
+	size_t expect_min = 1;
 	unsigned expect_first = 0;
 	for (unsigned i = 0; i < npools; i++) {
 		char        name[128];

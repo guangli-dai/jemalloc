@@ -1167,30 +1167,31 @@ mallctl("arena." STRINGIFY(MALLCTL_ARENAS_ALL) ".decay",
         <literal>size_start-size_end:nshards</literal> separated by
         <literal>|</literal>, in the same grammar as
         <link linkend="opt.tcache_ncached_max"><mallctl>opt.tcache_ncached_max</mallctl></link>.
-        Sizes are <emphasis>extent</emphasis> sizes, not the sizes an
-        application requested, and the bands must tile the range from a page to
-        a hugepage exactly: the first must start at the page size, each must
-        begin one byte past the end of the last, and the last must end at the
-        hugepage size.  A gap is rejected rather than tolerated, because sizes
-        falling in one would quietly be served by the conventional page
-        allocator instead.</para>
+        Sizes are the sizes an application <emphasis>requested</emphasis>,
+        rounded to a size class -- not the size of the extent that ends up
+        backing the request.  A bin slab is routed by the size of the objects
+        it will hold, not by its own size.  The bands must tile the range from
+        1 to a hugepage exactly: the first must start at 1, each must begin one
+        byte past the end of the last, and the last must end at the hugepage
+        size.  A gap is rejected rather than tolerated, because sizes falling
+        in one would quietly be served by the conventional page allocator
+        instead.</para>
 
-        <para>Routing granularity is the page-size class rather than the byte,
-        so a bound falling strictly inside a class has the effect of the end of
-        that class.</para>
+        <para>Routing granularity is the size class rather than the byte, so a
+        bound falling strictly inside a class has the effect of the end of that
+        class.</para>
 
-        <para>That extents rather than requests are what is routed has a
-        consequence worth stating plainly, because it silently defeats the
-        arrangement these bands are usually built for.  With <link
+        <para>Routing on the requested size rather than the extent size also
+        keeps <link
         linkend="opt.cache_oblivious"><mallctl>opt.cache_oblivious</mallctl></link>
-        enabled, which is the default, a large allocation's extent is one page
-        larger than the size requested.  Two 1 MiB requests therefore need two
-        pages more than a 2 MiB hugepage and cannot share one, and each lands
-        in whichever band covers 1 MiB plus a page rather than the band chosen
-        for 1 MiB.  A layout whose boundaries were picked from request sizes
-        needs <link
-        linkend="opt.cache_oblivious"><mallctl>opt.cache_oblivious</mallctl></link>
-        disabled, or boundaries picked from padded sizes instead.</para>
+        and per-bin slab sizing out of the routing decision.  Both change the
+        size of the extent that backs a request without changing what the
+        caller asked for, so under extent-based routing either could move a
+        band boundary out from under a configuration that looked correct.  What
+        they still affect is whether two extents physically fit in one
+        hugepage: with cache-oblivious layout a large extent is a page larger
+        than the request, so two 1 MiB requests need two pages more than a
+        hugepage and cannot share one.</para>
 
         <para>Ignored unless
         <link linkend="opt.hpa_shard_pools"><mallctl>opt.hpa_shard_pools</mallctl></link>

@@ -124,7 +124,7 @@ setup_arena(void) {
 	 */
 	if (g_nclaimed == 0) {
 		g_claimed[g_nclaimed++] = hpa_route(&hpa_pools_global, PAGE,
-		    /* slab */ false, SC_NSIZES, /* hint */ 0);
+		    /* slab */ false, sz_size2index(PAGE), /* hint */ 0);
 	}
 
 	unsigned     arena_ind = 0;
@@ -135,7 +135,7 @@ setup_arena(void) {
 		expect_d_eq(mallctl("arenas.create", &arena_ind, &sz, NULL, 0),
 		    0, "arenas.create failed");
 		hpa_shard_t *cand = hpa_route(&hpa_pools_global, PAGE,
-		    /* slab */ false, SC_NSIZES, arena_ind);
+		    /* slab */ false, sz_size2index(PAGE), arena_ind);
 		bool taken = false;
 		for (unsigned k = 0; k < g_nclaimed; k++) {
 			if (g_claimed[k] == cand) {
@@ -159,7 +159,7 @@ setup_arena(void) {
 	    0, "epoch mib lookup failed");
 
 	g_shard = hpa_route(&hpa_pools_global, PAGE, /* slab */ false,
-	    SC_NSIZES, /* hint */ arena_ind);
+	    sz_size2index(PAGE), /* hint */ arena_ind);
 	npageslabs_baseline();
 	return true;
 }

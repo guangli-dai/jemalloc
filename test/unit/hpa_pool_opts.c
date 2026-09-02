@@ -54,7 +54,7 @@
 #else
 #define FIRST_BAND_MIN "65536"
 #endif
-#define SMALL_BAND FIRST_BAND_MIN "-" STRINGIFY(SMALL_BAND_MAX)
+#define SMALL_BAND "1-" STRINGIFY(SMALL_BAND_MAX)
 #define BIG_BAND   "524289-2097152"
 #define POOLS_CONF                                                             \
 	"hpa_pools:" SMALL_BAND ":1|" BIG_BAND ":1,"                           \
@@ -300,59 +300,59 @@ TEST_BEGIN(test_set_opt_rejects) {
 	 */
 	hpa_pool_layout_t layout;
 	hpa_pool_layout_init(&layout);
-	expect_false(hpa_pool_layout_add(&layout, PAGE, 4 * PAGE, 1), "");
+	expect_false(hpa_pool_layout_add(&layout, 1, 4 * PAGE, 1), "");
 	expect_false(hpa_pool_layout_add(&layout, 4 * PAGE + 1, HUGEPAGE, 1),
 	    "");
 
 	/* A band that is not configured. */
-	expect_true(hpa_pool_layout_set_opt(&layout, PAGE, 2 * PAGE,
+	expect_true(hpa_pool_layout_set_opt(&layout, 1, 2 * PAGE,
 	                "hugify_delay_ms", sizeof("hugify_delay_ms") - 1, "0",
 	                1),
 	    "a range that names no band should be rejected");
 
 	/* A band whose start is right but whose end is not. */
-	expect_true(hpa_pool_layout_set_opt(&layout, PAGE, HUGEPAGE,
+	expect_true(hpa_pool_layout_set_opt(&layout, 1, HUGEPAGE,
 	                "hugify_delay_ms", sizeof("hugify_delay_ms") - 1, "0",
 	                1),
 	    "a partially matching range should be rejected");
 
 	/* An option that does not exist. */
-	expect_true(hpa_pool_layout_set_opt(&layout, PAGE, 4 * PAGE, "nonsense",
+	expect_true(hpa_pool_layout_set_opt(&layout, 1, 4 * PAGE, "nonsense",
 	                sizeof("nonsense") - 1, "1", 1),
 	    "an unknown option should be rejected");
 
 	/* A prefix of a real option, which strncmp alone would accept. */
-	expect_true(hpa_pool_layout_set_opt(&layout, PAGE, 4 * PAGE, "hugify",
+	expect_true(hpa_pool_layout_set_opt(&layout, 1, 4 * PAGE, "hugify",
 	                sizeof("hugify") - 1, "0", 1),
 	    "a prefix of an option name should be rejected");
 
 	/* Values out of range, and values of the wrong shape. */
-	expect_true(hpa_pool_layout_set_opt(&layout, PAGE, 4 * PAGE,
+	expect_true(hpa_pool_layout_set_opt(&layout, 1, 4 * PAGE,
 	                "slab_max_alloc", sizeof("slab_max_alloc") - 1, "1", 1),
 	    "a slab_max_alloc below PAGE should be rejected");
-	expect_true(hpa_pool_layout_set_opt(&layout, PAGE, 4 * PAGE,
+	expect_true(hpa_pool_layout_set_opt(&layout, 1, 4 * PAGE,
 	                "hugification_threshold",
 	                sizeof("hugification_threshold") - 1, "99999999", 8),
 	    "a threshold above HUGEPAGE should be rejected");
-	expect_true(hpa_pool_layout_set_opt(&layout, PAGE, 4 * PAGE,
+	expect_true(hpa_pool_layout_set_opt(&layout, 1, 4 * PAGE,
 	                "hugify_sync", sizeof("hugify_sync") - 1, "yes", 3),
 	    "a non-boolean hugify_sync should be rejected");
-	expect_true(hpa_pool_layout_set_opt(&layout, PAGE, 4 * PAGE,
+	expect_true(hpa_pool_layout_set_opt(&layout, 1, 4 * PAGE,
 	                "hugify_style", sizeof("hugify_style") - 1, "e", 1),
 	    "a prefix of a hugify_style name should be rejected");
-	expect_true(hpa_pool_layout_set_opt(&layout, PAGE, 4 * PAGE,
+	expect_true(hpa_pool_layout_set_opt(&layout, 1, 4 * PAGE,
 	                "hugify_delay_ms", sizeof("hugify_delay_ms") - 1, "12x",
 	                3),
 	    "trailing junk after a number should be rejected");
 
 	/* And the accepting cases, so the rejections above mean something. */
-	expect_false(hpa_pool_layout_set_opt(&layout, PAGE, 4 * PAGE,
+	expect_false(hpa_pool_layout_set_opt(&layout, 1, 4 * PAGE,
 	                 "hugify_style", sizeof("hugify_style") - 1, "eager",
 	                 5),
 	    "a valid hugify_style should be accepted");
 	expect_d_eq((int)layout.pools[0].opts.hugify_style,
 	    (int)hpa_hugify_style_eager, "hugify_style did not take");
-	expect_false(hpa_pool_layout_set_opt(&layout, PAGE, 4 * PAGE,
+	expect_false(hpa_pool_layout_set_opt(&layout, 1, 4 * PAGE,
 	                 "dirty_mult", sizeof("dirty_mult") - 1, "-1", 2),
 	    "dirty_mult:-1 should be accepted");
 	expect_u32_eq((uint32_t)layout.pools[0].opts.dirty_mult, (uint32_t)-1,

@@ -21,10 +21,11 @@
  *
  * Allocation is two decisions:
  *
- *   1. size -> pool.  Forced.  A total function over [PAGE, HUGEPAGE], fixed
- *      at boot, so the same key always yields the same pool.  This is what
- *      buys segregation: extents of very different sizes cannot land in the
- *      same psset, and therefore cannot share a hugepage.
+ *   1. requested size -> pool.  Forced.  A total function over the size
+ *      classes, fixed at boot, so the same class always yields the same pool.
+ *      This is what buys segregation: allocations of very different requested
+ *      sizes cannot land in the same psset, and therefore cannot share a
+ *      hugepage.
  *
  *   2. pool -> one of that pool's own shards.  Free.  Every shard in a pool
  *      serves the same size band under the same policy, so the pool may
@@ -33,11 +34,10 @@
  *      wrong.
  *
  * Deallocation makes no decision at all.  An extent goes back to the shard
- * that served it, recorded in the extent itself (EDATA_BITS_HPA_SHARD).  Step
- * 1 would be invertible -- extent sizes are stable, since the HPA refuses
- * expand and shrink -- but step 2 is not: nothing about an extent says which
- * of its pool's shards produced it.  That asymmetry is the whole reason the
- * owning shard has to be recorded rather than recomputed.
+ * that served it, recorded in the extent itself (EDATA_BITS_HPA_SHARD).  Even
+ * if step 1 could be run backwards, step 2 cannot: nothing about an extent
+ * says which of its pool's shards produced it.  That asymmetry is the whole
+ * reason the owning shard has to be recorded rather than recomputed.
  */
 
 /*
@@ -68,25 +68,12 @@ typedef enum hpa_pool_pick_e {
 extern const char *const hpa_pool_pick_names[];
 
 /*
- * Routing table size: one entry per page-size class that can describe an
- * extent the HPA is willing to serve, i.e. up to HUGEPAGE.  This is the same
- * bound the psset uses to index its own per-pszind structures, for the same
- * reason.  hpa_pools_boot() asserts the bound actually covers HUGEPAGE.
+ * Routing table size: one entry per size class.
+ *
+ * The key is the size class of the size the *caller asked for*, not of the
+ * extent that ends up backing it.  See hpa_route_key() for why.
  */
-#define HPA_ROUTE_NKEYS PSSET_NPSIZES
-
-/*
- * Two separate preconditions, both checked rather than assumed.  Routing needs
- * the table to cover every size the HPA can serve, which hpa_pools_boot()
- * asserts against sz_psz2ind(HUGEPAGE).  Building the table is stricter: it
- * calls sz_pind2sz() for *every* key, whose own precondition is the full
- * page-size-class range.  A configuration that satisfied the first and broke
- * the second would trip an assert deep inside sz.h at boot rather than say
- * anything useful here.
- */
-#if HPA_ROUTE_NKEYS > SC_NPSIZES + 1
-#error "HPA_ROUTE_NKEYS exceeds the valid sz_pind2sz() domain"
-#endif
+#define HPA_ROUTE_NKEYS SC_NSIZES
 
 /* A cap on pools, purely so the set can be a fixed-size struct. */
 #define HPA_MAX_POOLS 8
@@ -496,27 +483,43 @@ bool hpa_pools_boot(tsdn_t *tsdn, hpa_pool_set_t *set, base_t *base,
     const sec_opts_t *sec_opts);
 
 /*
- * Step 1.  The key is derived from the extent size; slab and szind are
- * accepted and currently ignored.
+ * Step 1: which pool serves this request.
  *
- * They are in the signature from the outset because they are free -- both are
- * already arguments to pa_alloc() -- and because keying on (slab, size)
- * instead of size alone is the most likely next refinement: the bins and
- * large channels do not even share a size domain, so one set of boundaries
- * has to describe two differently-shaped distributions.
+ * Keyed on szind -- the size class of the size the caller asked for -- rather
+ * than on the size of the extent that will back it.  The extent size is
+ * available and was the original key; it turned out to be the wrong one, for a
+ * reason worth writing down because it is not obvious.
  *
- * Having them here means that change costs no churn at the call sites.  It is
- * not, however, confined to this function: routing the same extent size to
- * different pools depending on channel needs a second table dimension, and a
- * layout that can express overlapping bands rather than one ascending list of
- * bounds.  What is bought now is the interface, not the implementation.
+ * The extent size is a *function* of szind: a bin slab's extent is
+ * bin_info[binind].slab_size, and a large extent is usize + sz_large_pad.  So
+ * szind determines the extent size, but not the reverse -- one extent size
+ * covers many size classes.  With default 4 KiB-page settings the whole
+ * small-allocation population, all 36 bins, produces just five distinct slab
+ * sizes: 4096, 8192, 12288, 20480 and 28672.  Keying on the extent size
+ * therefore gives the router five distinguishable values for every small
+ * allocation in the process, and the grouping it produces has nothing to do
+ * with the objects: slab_size alternates with binind, so 64-byte and 80-byte
+ * objects land in different pools while 8-byte and 4096-byte objects land in
+ * the same one.
+ *
+ * Keying on szind is strictly more expressive.  It can reproduce any
+ * extent-size layout exactly -- map each class to the pool its extent size
+ * would have selected -- and can additionally separate classes that share an
+ * extent size.  It also means slab_sizes, which rewrites the extent size of a
+ * bin without changing what callers ask for, can no longer silently reshuffle
+ * the routing.
+ *
+ * size and slab stay in the signature: size is what hpa_alloc() still applies
+ * slab_max_alloc to, and slab is the most likely next refinement, since bin
+ * slabs and large extents can collide in the class space.
  */
 JEMALLOC_ALWAYS_INLINE unsigned
 hpa_route_key(size_t size, bool slab, szind_t szind) {
+	(void)size;
 	(void)slab;
-	(void)szind;
 	assert(size <= HUGEPAGE);
-	return (unsigned)sz_psz2ind(size);
+	assert(szind < SC_NSIZES);
+	return (unsigned)szind;
 }
 
 JEMALLOC_ALWAYS_INLINE hpa_pool_t *

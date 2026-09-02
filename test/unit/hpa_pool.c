@@ -31,7 +31,7 @@ pool_set_init(hpa_pool_set_t *set, unsigned npools, const size_t *bounds,
     const unsigned *nshards, hpa_pool_pick_t pick) {
 	memset(set, 0, sizeof(*set));
 	set->npools = npools;
-	size_t   size_min = PAGE;
+	size_t   size_min = 1;
 	unsigned next_shard = 0;
 	for (unsigned i = 0; i < npools; i++) {
 		set->pools[i].size_min = size_min;
@@ -57,12 +57,41 @@ pool_set_init(hpa_pool_set_t *set, unsigned npools, const size_t *bounds,
 	set->initialized = true;
 }
 
-/* Which shard index within the whole set did routing pick? */
+/*
+ * Which shard index within the whole set did routing pick?
+ *
+ * szind is derived from the requested size the way the allocator derives it,
+ * because that -- not the extent size -- is what the router keys on.
+ */
 static unsigned
 route_to_id(hpa_pool_set_t *set, size_t size, unsigned hint) {
 	hpa_shard_t *shard = hpa_route(set, size, /* slab */ false,
-	    /* szind */ SC_NSIZES, hint);
+	    sz_size2index(size), hint);
 	return (unsigned)(shard - set->shards);
+}
+
+/*
+ * Largest class the router can be handed -- mirrors the bound in
+ * hpa_pool_build_route_table(), including the narrower domain sz_index2size()
+ * has when large size classes are disabled.
+ */
+static szind_t
+max_routed_index(void) {
+	szind_t max = sz_size2index(HUGEPAGE);
+	if (sz_large_size_classes_disabled()) {
+		szind_t capped = sz_size2index(USIZE_GROW_SLOW_THRESHOLD);
+		if (capped < max) {
+			max = capped;
+		}
+	}
+	return max;
+}
+
+/* The pool a requested size routes to. */
+static hpa_pool_t *
+pool_of_size(hpa_pool_set_t *set, size_t size) {
+	return hpa_pool_lookup(set,
+	    hpa_route_key(size, /* slab */ false, sz_size2index(size)));
 }
 
 TEST_BEGIN(test_route_table_totality) {
@@ -77,9 +106,13 @@ TEST_BEGIN(test_route_table_totality) {
 	unsigned       nshards[] = {4, 2, 1};
 	pool_set_init(&set, 3, bounds, nshards, hpa_pool_pick_arena);
 
-	for (size_t size = PAGE; size <= HUGEPAGE; size += PAGE) {
-		unsigned    key = hpa_route_key(size, false, SC_NSIZES);
-		hpa_pool_t *pool = hpa_pool_lookup(&set, key);
+	for (szind_t i = 0; i <= max_routed_index(); i++) {
+		size_t size = sz_index2size(i);
+		if (size > HUGEPAGE) {
+			/* Never routed: pa_alloc() gates on the extent size. */
+			continue;
+		}
+		hpa_pool_t *pool = pool_of_size(&set, size);
 		expect_ptr_not_null(pool, "size %zu routed nowhere", size);
 		expect_true(size <= pool->size_max,
 		    "size %zu routed to a pool whose band ends at %zu", size,
@@ -102,7 +135,11 @@ TEST_BEGIN(test_route_table_matches_linear_scan) {
 	unsigned       nshards[] = {4, 2, 1};
 	pool_set_init(&set, 3, bounds, nshards, hpa_pool_pick_arena);
 
-	for (size_t size = PAGE; size <= HUGEPAGE; size += PAGE) {
+	for (szind_t k = 0; k <= max_routed_index(); k++) {
+		size_t size = sz_index2size(k);
+		if (size > HUGEPAGE) {
+			continue;
+		}
 		hpa_pool_t *want = NULL;
 		for (unsigned i = 0; i < set.npools; i++) {
 			if (size <= set.pools[i].size_max) {
@@ -110,8 +147,7 @@ TEST_BEGIN(test_route_table_matches_linear_scan) {
 				break;
 			}
 		}
-		hpa_pool_t *got = hpa_pool_lookup(&set,
-		    hpa_route_key(size, false, SC_NSIZES));
+		hpa_pool_t *got = pool_of_size(&set, size);
 		expect_ptr_eq(got, want,
 		    "size %zu: table and linear scan disagree", size);
 	}
@@ -129,11 +165,13 @@ TEST_BEGIN(test_route_is_monotonic) {
 	unsigned       nshards[] = {4, 2, 1};
 	pool_set_init(&set, 3, bounds, nshards, hpa_pool_pick_arena);
 
-	hpa_pool_t *prev = hpa_pool_lookup(&set,
-	    hpa_route_key(PAGE, false, SC_NSIZES));
-	for (size_t size = PAGE; size <= HUGEPAGE; size += PAGE) {
-		hpa_pool_t *pool = hpa_pool_lookup(&set,
-		    hpa_route_key(size, false, SC_NSIZES));
+	hpa_pool_t *prev = pool_of_size(&set, sz_index2size(0));
+	for (szind_t k = 0; k <= max_routed_index(); k++) {
+		size_t size = sz_index2size(k);
+		if (size > HUGEPAGE) {
+			continue;
+		}
+		hpa_pool_t *pool = pool_of_size(&set, size);
 		expect_true(pool >= prev,
 		    "routing went backwards at size %zu", size);
 		prev = pool;
@@ -142,27 +180,27 @@ TEST_BEGIN(test_route_is_monotonic) {
 TEST_END
 
 TEST_BEGIN(test_route_boundaries_are_exact) {
-	/* The interesting boundaries are page-size classes, so they land
-	 * exactly: 16 KiB belongs to pool 0, one page more to pool 1. */
+	/* The interesting boundaries are size-class boundaries, so they land
+	 * exactly: 16 KiB belongs to pool 0, the next class up to pool 1. */
 	hpa_pool_set_t set;
 	size_t         bounds[] = {POOL_SMALL_MAX, POOL_MED_MAX, HUGEPAGE};
 	unsigned       nshards[] = {4, 2, 1};
 	pool_set_init(&set, 3, bounds, nshards, hpa_pool_pick_arena);
 
 	expect_ptr_eq(hpa_pool_lookup(&set,
-	    hpa_route_key(POOL_SMALL_MAX, false, SC_NSIZES)), &set.pools[0],
+	    hpa_route_key(POOL_SMALL_MAX, false, sz_size2index(POOL_SMALL_MAX))), &set.pools[0],
 	    "the small bound should be the top of pool 0");
 	expect_ptr_eq(hpa_pool_lookup(&set,
-	    hpa_route_key(POOL_SMALL_MAX + PAGE, false, SC_NSIZES)),
-	    &set.pools[1], "one page over the small bound should be pool 1");
+	    hpa_route_key(POOL_SMALL_MAX + 1, false, sz_size2index(POOL_SMALL_MAX + 1))),
+	    &set.pools[1], "the class above the small bound should be pool 1");
 	expect_ptr_eq(hpa_pool_lookup(&set,
-	    hpa_route_key(POOL_MED_MAX, false, SC_NSIZES)), &set.pools[1],
+	    hpa_route_key(POOL_MED_MAX, false, sz_size2index(POOL_MED_MAX))), &set.pools[1],
 	    "the medium bound should be the top of pool 1");
 	expect_ptr_eq(hpa_pool_lookup(&set,
-	    hpa_route_key(POOL_MED_MAX + PAGE, false, SC_NSIZES)),
-	    &set.pools[2], "one page over the medium bound should be pool 2");
+	    hpa_route_key(POOL_MED_MAX + 1, false, sz_size2index(POOL_MED_MAX + 1))),
+	    &set.pools[2], "the class above the medium bound should be pool 2");
 	expect_ptr_eq(hpa_pool_lookup(&set,
-	    hpa_route_key(HUGEPAGE, false, SC_NSIZES)), &set.pools[2],
+	    hpa_route_key(HUGEPAGE, false, sz_size2index(HUGEPAGE))), &set.pools[2],
 	    "HUGEPAGE should be the top of the last pool");
 }
 TEST_END
@@ -225,7 +263,7 @@ TEST_BEGIN(test_pick_arena_is_identity) {
 	pool_set_init(&set, 1, bounds, nshards, hpa_pool_pick_arena);
 
 	for (unsigned arena = 0; arena < narenas; arena++) {
-		for (size_t size = PAGE; size <= HUGEPAGE; size *= 2) {
+		for (size_t size = 8; size <= HUGEPAGE; size *= 2) {
 			expect_u_eq(route_to_id(&set, size, arena), arena,
 			    "arena %u, size %zu: identity layout must route to "
 			    "shard %u", arena, size, arena);
@@ -363,7 +401,7 @@ TEST_BEGIN(test_layout_add_tiles_or_rejects) {
 
 	/* A well-formed three-band tiling. */
 	hpa_pool_layout_init(&layout);
-	expect_false(hpa_pool_layout_add(&layout, PAGE, POOL_SMALL_MAX, 4),
+	expect_false(hpa_pool_layout_add(&layout, 1, POOL_SMALL_MAX, 4),
 	    "first band should be accepted");
 	expect_false(hpa_pool_layout_add(&layout, POOL_SMALL_MAX + 1,
 	                 POOL_MED_MAX, 2),
@@ -377,12 +415,12 @@ TEST_BEGIN(test_layout_add_tiles_or_rejects) {
 
 	/* First band must start at PAGE. */
 	hpa_pool_layout_init(&layout);
-	expect_true(hpa_pool_layout_add(&layout, 2 * PAGE, HUGEPAGE, 1),
-	    "a first band starting above PAGE should be rejected");
+	expect_true(hpa_pool_layout_add(&layout, 2, HUGEPAGE, 1),
+	    "a first band starting above 1 should be rejected");
 
 	/* Gap between bands. */
 	hpa_pool_layout_init(&layout);
-	expect_false(hpa_pool_layout_add(&layout, PAGE, POOL_SMALL_MAX, 1),
+	expect_false(hpa_pool_layout_add(&layout, 1, POOL_SMALL_MAX, 1),
 	    "first band should be accepted");
 	expect_true(hpa_pool_layout_add(&layout, POOL_SMALL_MAX + 2,
 	                POOL_MED_MAX, 1),
@@ -390,7 +428,7 @@ TEST_BEGIN(test_layout_add_tiles_or_rejects) {
 
 	/* Overlap with the previous band. */
 	hpa_pool_layout_init(&layout);
-	expect_false(hpa_pool_layout_add(&layout, PAGE, POOL_MED_MAX, 1),
+	expect_false(hpa_pool_layout_add(&layout, 1, POOL_MED_MAX, 1),
 	    "first band should be accepted");
 	expect_true(
 	    hpa_pool_layout_add(&layout, POOL_SMALL_MAX, HUGEPAGE, 1),
@@ -398,7 +436,7 @@ TEST_BEGIN(test_layout_add_tiles_or_rejects) {
 
 	/* Backwards band. */
 	hpa_pool_layout_init(&layout);
-	expect_true(hpa_pool_layout_add(&layout, PAGE, PAGE / 2, 1),
+	expect_true(hpa_pool_layout_add(&layout, 1, 0, 1),
 	    "a band whose end precedes its start should be rejected");
 
 	/*
@@ -408,7 +446,7 @@ TEST_BEGIN(test_layout_add_tiles_or_rejects) {
 	 */
 	hpa_pool_layout_init(&layout);
 	for (unsigned i = 0; i < HPA_MAX_POOLS; i++) {
-		size_t start = (i == 0) ? PAGE : i * PAGE + 1;
+		size_t start = (i == 0) ? 1 : i * PAGE + 1;
 		expect_false(
 		    hpa_pool_layout_add(&layout, start, (i + 1) * PAGE, 1),
 		    "band %u should fit", i);
@@ -430,27 +468,27 @@ TEST_BEGIN(test_layout_validate_rejects) {
 	/* Does not reach HUGEPAGE: the top of the range has no pool. */
 	hpa_pool_layout_init(&layout);
 	expect_false(
-	    hpa_pool_layout_add(&layout, PAGE, HUGEPAGE / 2, 1), "");
+	    hpa_pool_layout_add(&layout, 1, HUGEPAGE / 2, 1), "");
 	expect_true(hpa_pool_layout_validate(&layout),
 	    "a layout that stops short of HUGEPAGE should be rejected");
 
 	/* Past HUGEPAGE: describes extents the HPA will never serve. */
 	hpa_pool_layout_init(&layout);
 	expect_false(
-	    hpa_pool_layout_add(&layout, PAGE, 2 * HUGEPAGE, 1), "");
+	    hpa_pool_layout_add(&layout, 1, 2 * HUGEPAGE, 1), "");
 	expect_true(hpa_pool_layout_validate(&layout),
 	    "a band above HUGEPAGE should be rejected");
 
 	/* Not page-aligned. */
 	hpa_pool_layout_init(&layout);
 	expect_false(
-	    hpa_pool_layout_add(&layout, PAGE, HUGEPAGE - 1, 1), "");
+	    hpa_pool_layout_add(&layout, 1, HUGEPAGE - 1, 1), "");
 	expect_true(hpa_pool_layout_validate(&layout),
 	    "an unaligned band bound should be rejected");
 
 	/* A pool with no shards. */
 	hpa_pool_layout_init(&layout);
-	expect_false(hpa_pool_layout_add(&layout, PAGE, HUGEPAGE, 0), "");
+	expect_false(hpa_pool_layout_add(&layout, 1, HUGEPAGE, 0), "");
 	expect_true(hpa_pool_layout_validate(&layout),
 	    "a pool with no shards should be rejected");
 
@@ -466,7 +504,7 @@ TEST_BEGIN(test_layout_validate_rejects) {
 	 */
 	hpa_pool_layout_init(&layout);
 	expect_false(
-	    hpa_pool_layout_add(&layout, PAGE, POOL_SMALL_MAX, 1), "");
+	    hpa_pool_layout_add(&layout, 1, POOL_SMALL_MAX, 1), "");
 	expect_false(
 	    hpa_pool_layout_add(&layout, POOL_SMALL_MAX + 1, HUGEPAGE, 1), "");
 	layout.nshards_max = 1;
