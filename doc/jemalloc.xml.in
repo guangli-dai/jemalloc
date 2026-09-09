@@ -3332,6 +3332,32 @@ struct extent_hooks_s {
         mutexes, arena mutexes and bin mutexes.</para></listitem>
       </varlistentry>
 
+      <varlistentry id="stats.arenas.i.hpa_shard">
+        <term>
+          <mallctl>stats.arenas.&lt;i&gt;.hpa_shard.{counter}</mallctl>
+          <mallctl>stats.arenas.&lt;i&gt;.hpa_sec_{counter}</mallctl>
+          <literal>r-</literal>
+          [<option>--enable-stats</option>]
+        </term>
+        <listitem><para>Retained for compatibility, and only for
+        <parameter>i</parameter> equal to
+        <constant>MALLCTL_ARENAS_ALL</constant> (or its deprecated
+        <mallctl>arena.&lt;narenas&gt;</mallctl> spelling).  Before HPA shards
+        were moved into process-wide pools each arena owned a shard and these
+        paths reported it; they now report the same process-wide figures as the
+        corresponding <mallctl>stats.hpa.*</mallctl> nodes.  Since the merged
+        pseudo-arena always meant the process-wide total, its value is unchanged
+        in meaning.</para>
+
+        <para>For any concrete arena, and for
+        <constant>MALLCTL_ARENAS_DESTROYED</constant>, these return
+        <errorname>ENOENT</errorname>.  One HPA now serves every arena, so there
+        is no per-arena figure to report, and returning the process-wide totals
+        instead would give an arena-shaped number that is not about that arena.
+        For a per-band breakdown use <link
+        linkend="stats.hpa.pool.i.npageslabs_huge"><mallctl>stats.hpa.pool.&lt;i&gt;.*</mallctl></link>.</para></listitem>
+      </varlistentry>
+
       <varlistentry id="stats.hpa.pool.i.npageslabs_huge">
         <term>
           <mallctl>stats.hpa.pool.&lt;i&gt;.npageslabs_huge</mallctl>

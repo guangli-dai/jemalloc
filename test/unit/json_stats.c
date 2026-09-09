@@ -656,6 +656,13 @@ static const char *const merged_keys[] = {"nthreads", "uptime_ns", "dss",
 	"metadata_rtree", "metadata_thp", "tcache_bytes",
 	"tcache_stashed_bytes", "resident", "abandoned_vm", "extent_avail",
 	"mutexes", "bins", "lextents", "extents"};
+/*
+ * Emitted per arena only in JSON, and only when HPA is on: the process-wide
+ * HPA figures, re-exposed at the pre-pool path stats.arenas.<i>.hpa_shard so
+ * that consumers of that path keep working.  Not counted in merged_keys
+ * because it is conditional.
+ */
+static const char *const hpa_shard_key[] = {"hpa_shard"};
 static const char *const pac_sec_keys[] = {"pac_sec_bytes", "pac_sec_hits",
 	"pac_sec_misses", "pac_sec_dalloc_noflush", "pac_sec_dalloc_flush"};
 
@@ -877,10 +884,35 @@ TEST_BEGIN(test_json_stats_global_and_arena) {
 	if (opt_pac_sec_opts.nshards > 0) {
 		expected_merged_keys += ARRAY_COUNT(pac_sec_keys);
 	}
+	/*
+	 * merged only.  Emitted whenever the stats print includes HPA, which is
+	 * the gate the pre-pool code used -- not gated on opt_hpa, so it is
+	 * present (as zeros) even with the HPA off.
+	 */
+	expected_merged_keys += ARRAY_COUNT(hpa_shard_key);
 	expect_zu_eq(json_object_size(merged), expected_merged_keys,
 	    "merged arena stats has an unexpected number of keys");
 	expect_json_object_has_keys(merged, merged_keys, ARRAY_COUNT(merged_keys),
 	    "merged arena stats");
+	{
+		/*
+		 * The compatibility path must carry the same figures as the
+		 * canonical stats.hpa one, or restoring it would be worse than
+		 * leaving it out -- a consumer would read a plausible wrong
+		 * number instead of failing loudly.
+		 */
+		expect_json_object_has_keys(merged, hpa_shard_key,
+		    ARRAY_COUNT(hpa_shard_key), "merged arena stats");
+		json_fragment_t compat;
+		expect_false(json_object_member(merged, "hpa_shard", &compat),
+		    "merged arena stats is missing hpa_shard");
+		size_t canonical = 0;
+		size_t sz = sizeof(canonical);
+		expect_d_eq(mallctl("stats.hpa.npageslabs", &canonical, &sz,
+		    NULL, 0), 0, "stats.hpa.npageslabs unreadable");
+		expect_json_uint_eq(compat, "npageslabs", canonical,
+		    "merged hpa_shard");
+	}
 	expect_json_ctl_fields(
 	    merged, arena_prefix, arena_fields, ARRAY_COUNT(arena_fields));
 	if (opt_pac_sec_opts.nshards > 0) {

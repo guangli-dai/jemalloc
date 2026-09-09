@@ -78,7 +78,8 @@ static void stats_print_runtime_stats(emitter_t *emitter, bool merged,
  *         bins [b]              -> stats_arena_bins_print       (.bins[j])
  *         lextents [l]          -> stats_arena_lextents_print   (.lextents[j])
  *         extents [e]           -> stats_arena_extents_print    (.extents[j])
- *         hpa shard [h]         -> stats_arena_hpa_shard_print  (.hpa_shard)
+ *         hpa shard [h]         -> re-emitted process-wide HPA figures
+ *                                  (.hpa_shard, JSON only, compat)
  *   }
  *   --- End jemalloc statistics ---
  *
@@ -2130,6 +2131,29 @@ stats_arena_print(emitter_t *emitter, unsigned i, bool bins, bool large,
 	}
 	if (extents) {
 		stats_arena_extents_print(emitter, i);
+	}
+
+	/*
+	 * Compatibility surface: re-emit the process-wide HPA figures under
+	 * stats.arenas.<i>.hpa_shard, where they lived before pools moved them
+	 * to stats.hpa.  Consumers had been reading that path for years, and
+	 * deleting it rather than adding alongside it broke them silently.
+	 *
+	 * merged only, and JSON only.  merged always meant the process-wide
+	 * total, so it stays exactly right; a concrete arena has no per-arena
+	 * HPA figure now that one HPA serves them all, and inventing one would
+	 * publish an arena-shaped number that is not about that arena.
+	 * Repeating the subtree under every arena would also multiply a default
+	 * JSON dump by narenas -- the nonfull-slab and allocation-distribution
+	 * arrays alone are dozens of buckets each.  The table already prints one
+	 * HPA section via stats_hpa_print(), and was never the parsed interface.
+	 */
+	if (hpa && i == MALLCTL_ARENAS_ALL && emitter_outputs_json(emitter)) {
+		emitter_json_object_kv_begin(emitter, "hpa_shard");
+		stats_arena_hpa_shard_sec_print(emitter);
+		stats_arena_hpa_shard_counters_print(emitter, uptime);
+		stats_arena_hpa_shard_slabs_print(emitter);
+		emitter_json_object_end(emitter);
 	}
 }
 

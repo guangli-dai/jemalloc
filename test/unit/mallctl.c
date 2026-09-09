@@ -2192,6 +2192,93 @@ TEST_BEGIN(test_stats_arenas_hpa_shard_counters) {
 }
 TEST_END
 
+/*
+ * The pre-pool paths must keep resolving and must agree with the canonical
+ * stats.hpa.* ones.  Pools relocated these rather than adding alongside them,
+ * which silently removed 45 mallctl names that external consumers read.
+ */
+TEST_BEGIN(test_stats_arenas_hpa_shard_compat_paths) {
+	test_skip_if(!config_stats);
+
+	uint64_t epoch = 1;
+	expect_d_eq(mallctl("epoch", NULL, NULL, &epoch, sizeof(epoch)), 0,
+	    "Unexpected mallctl() failure");
+
+#define EXPECT_MATCHES(t, compat, canonical)                                   \
+	do {                                                                   \
+		t      a, b;                                                   \
+		size_t sza = sizeof(t), szb = sizeof(t);                       \
+		expect_d_eq(mallctl(compat, (void *)&a, &sza, NULL, 0), 0,     \
+		    "compat path %s must still resolve", compat);              \
+		expect_d_eq(mallctl(canonical, (void *)&b, &szb, NULL, 0), 0,  \
+		    "canonical path %s must resolve", canonical);              \
+		expect_true(a == b,                                            \
+		    "%s and %s disagree", compat, canonical);                  \
+	} while (0)
+
+	/* merged is the path consumers actually read. */
+	EXPECT_MATCHES(size_t, "stats.arenas." STRINGIFY(MALLCTL_ARENAS_ALL) ".hpa_shard.npageslabs",
+	    "stats.hpa.npageslabs");
+	EXPECT_MATCHES(size_t, "stats.arenas." STRINGIFY(MALLCTL_ARENAS_ALL) ".hpa_shard.nactive",
+	    "stats.hpa.nactive");
+	EXPECT_MATCHES(uint64_t, "stats.arenas." STRINGIFY(MALLCTL_ARENAS_ALL) ".hpa_shard.nhugifies",
+	    "stats.hpa.nhugifies");
+	EXPECT_MATCHES(size_t,
+	    "stats.arenas." STRINGIFY(MALLCTL_ARENAS_ALL) ".hpa_shard.slabs.npageslabs_huge",
+	    "stats.hpa.slabs.npageslabs_huge");
+	EXPECT_MATCHES(size_t, "stats.arenas." STRINGIFY(MALLCTL_ARENAS_ALL) ".hpa_sec_bytes",
+	    "stats.hpa.sec_bytes");
+
+	/*
+	 * A concrete arena must NOT resolve: there is no per-arena HPA figure
+	 * once one HPA serves every arena, and answering with the global totals
+	 * would hand back an arena-shaped number that is not about that arena.
+	 * Same for the destroyed pseudo-arena, which would otherwise report
+	 * live activity.
+	 */
+	{
+		size_t v;
+		size_t sz = sizeof(v);
+		expect_d_eq(mallctl("stats.arenas.0.hpa_shard.npageslabs",
+		    (void *)&v, &sz, NULL, 0), ENOENT,
+		    "a concrete arena must not report HPA stats");
+		sz = sizeof(v);
+		expect_d_eq(mallctl("stats.arenas.0.hpa_sec_bytes",
+		    (void *)&v, &sz, NULL, 0), ENOENT,
+		    "a concrete arena must not report HPA SEC stats");
+		sz = sizeof(v);
+		expect_d_eq(mallctl("stats.arenas."
+		    STRINGIFY(MALLCTL_ARENAS_DESTROYED) ".hpa_shard.npageslabs",
+		    (void *)&v, &sz, NULL, 0), ENOENT,
+		    "destroyed arenas must not report live HPA stats");
+	}
+
+	/* The indexed children resolve under merged, at both bounds. */
+	{
+		uint64_t v;
+		size_t sz = sizeof(v);
+		expect_d_eq(mallctl("stats.arenas."
+		    STRINGIFY(MALLCTL_ARENAS_ALL) ".hpa_shard.alloc.0.extents",
+		    (void *)&v, &sz, NULL, 0), 0, "alloc.0 must resolve");
+		size_t s2;
+		sz = sizeof(s2);
+		expect_d_eq(mallctl("stats.arenas."
+		    STRINGIFY(MALLCTL_ARENAS_ALL)
+		    ".hpa_shard.nonfull_slabs.0.npageslabs_huge",
+		    (void *)&s2, &sz, NULL, 0), 0,
+		    "nonfull_slabs.0 must resolve");
+		sz = sizeof(s2);
+		expect_d_ne(mallctl("stats.arenas."
+		    STRINGIFY(MALLCTL_ARENAS_ALL)
+		    ".hpa_shard.nonfull_slabs." STRINGIFY(PSSET_NPSIZES)
+		    ".npageslabs_huge", (void *)&s2, &sz, NULL, 0), 0,
+		    "nonfull_slabs index past the end must not resolve");
+	}
+
+#undef EXPECT_MATCHES
+}
+TEST_END
+
 TEST_BEGIN(test_stats_arenas_hpa_shard_slabs) {
 	test_skip_if(!config_stats);
 
@@ -2443,6 +2530,7 @@ main(void) {
 	    test_experimental_arenas_create_ext_errors, test_arenas_lookup,
 	    test_prof_active, test_stats_arenas,
 	    test_stats_arenas_hpa_shard_counters,
+	    test_stats_arenas_hpa_shard_compat_paths,
 	    test_stats_arenas_hpa_shard_slabs, test_thread_idle, test_thread_peak,
 	    test_thread_event_hook);
 }
