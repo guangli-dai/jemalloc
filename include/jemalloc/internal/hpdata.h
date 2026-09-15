@@ -90,6 +90,13 @@ struct hpdata_s {
 	/* Whether or not the hpdata is in a psset. */
 	bool h_in_psset;
 
+	/*
+	 * Which HPA shard this pageslab belongs to, or HPDATA_SHARD_NONE while
+	 * it is held by the central allocator and owned by nobody.  Ownership is
+	 * set before insertion into a shard's psset and remains immutable.
+	 */
+	unsigned h_shard;
+
 	union {
 		/* When nonempty (and also nonfull), used by the psset bins. */
 		hpdata_age_heap_link_t age_link;
@@ -137,6 +144,25 @@ TYPED_LIST(hpdata_purge_list, hpdata_t, ql_link_purge)
 TYPED_LIST(hpdata_hugify_list, hpdata_t, ql_link_hugify)
 
 ph_proto(, hpdata_age_heap, hpdata_t)
+
+/*
+ * h_shard while the pageslab has no owner.  No real shard may use this id.
+ */
+#define HPDATA_SHARD_NONE UINT_MAX
+
+static inline unsigned
+hpdata_shard_get(const hpdata_t *hpdata) {
+	assert(hpdata->h_shard != HPDATA_SHARD_NONE);
+	return hpdata->h_shard;
+}
+
+static inline void
+hpdata_shard_set(hpdata_t *hpdata, unsigned shard) {
+	assert(shard != HPDATA_SHARD_NONE);
+	/* Pageslab ownership is immutable. */
+	assert(hpdata->h_shard == HPDATA_SHARD_NONE);
+	hpdata->h_shard = shard;
+}
 
 static inline void *
 hpdata_addr_get(const hpdata_t *hpdata) {

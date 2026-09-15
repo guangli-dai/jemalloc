@@ -57,6 +57,18 @@ typedef enum extent_head_state_e extent_head_state_t;
 enum extent_pai_e { EXTENT_PAI_PAC = 0, EXTENT_PAI_HPA = 1 };
 typedef enum extent_pai_e extent_pai_t;
 
+/*
+ * Sentinel arena index for an extent that does not belong to an arena.  HPA
+ * extents have this value while cached in the SEC and acquire the requesting
+ * arena's index when allocated.
+ *
+ * edata_arena_ind_get() already asserts arena_ind < MALLOCX_ARENA_LIMIT, and
+ * this value is exactly that limit, so reading an unassociated extent through
+ * that accessor fails an assertion.  Valid arena indices end at one less than
+ * this value.
+ */
+#define EDATA_ARENA_IND_UNASSOCIATED MALLOCX_ARENA_LIMIT
+
 struct e_prof_info_s {
 	/* Time when this was allocated. */
 	nstime_t e_prof_alloc_time;
@@ -297,10 +309,19 @@ struct edata_s {
 TYPED_LIST(edata_list_active, edata_t, ql_link_active)
 TYPED_LIST(edata_list_inactive, edata_t, ql_link_inactive)
 
+/*
+ * Reads an arena index that may be EDATA_ARENA_IND_UNASSOCIATED.  Callers that
+ * require an associated extent should use edata_arena_ind_get().
+ */
+static inline unsigned
+edata_arena_ind_get_maybe_unassociated(const edata_t *edata) {
+	return (unsigned)((edata->e_bits & EDATA_BITS_ARENA_MASK)
+	    >> EDATA_BITS_ARENA_SHIFT);
+}
+
 static inline unsigned
 edata_arena_ind_get(const edata_t *edata) {
-	unsigned arena_ind = (unsigned)((edata->e_bits & EDATA_BITS_ARENA_MASK)
-	    >> EDATA_BITS_ARENA_SHIFT);
+	unsigned arena_ind = edata_arena_ind_get_maybe_unassociated(edata);
 	assert(arena_ind < MALLOCX_ARENA_LIMIT);
 
 	return arena_ind;
@@ -738,7 +759,7 @@ edata_init(edata_t *edata, unsigned arena_ind, void *addr, size_t size,
 static inline void
 edata_binit(
     edata_t *edata, void *addr, size_t bsize, uint64_t sn, bool reused) {
-	edata_arena_ind_set(edata, (1U << MALLOCX_ARENA_BITS) - 1);
+	edata_arena_ind_set(edata, EDATA_ARENA_IND_UNASSOCIATED);
 	edata_addr_set(edata, addr);
 	edata_bsize_set(edata, bsize);
 	edata_slab_set(edata, false);

@@ -14,6 +14,15 @@
 #include "jemalloc/internal/sec.h"
 
 /*
+ * The maximum number of HPA shards that can exist at once, across every pool.
+ *
+ * Shard ids are unsigned and UINT_MAX is reserved as HPDATA_SHARD_NONE, so the
+ * representational limit is UINT_MAX shards.  Any increase must also preserve
+ * overflow-safe allocation sizing and account for shard metadata costs.
+ */
+#define HPA_MAX_SHARDS_TOTAL 4096u
+
+/*
  * HPA-specific deferral interval bounds (currently unused).  Deferral tuning
  * is per-allocator policy, so it lives in the HPA header; see deferral.h for
  * the shared deferred-work contract.
@@ -197,6 +206,15 @@ struct hpa_shard_s {
 	 */
 	nstime_t last_time_work_attempted;
 };
+
+/*
+ * This shard's identity, recorded on each pageslab it owns so that extents can
+ * be returned to their owning shard.
+ */
+static inline unsigned
+hpa_shard_id(const hpa_shard_t *shard) {
+	return shard->ind;
+}
 
 /*
  * Whether or not the HPA can be used given the current configuration.  This
