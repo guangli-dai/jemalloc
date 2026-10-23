@@ -802,17 +802,29 @@ def generate_windows_msbuild_job():
 
     - name: Build VS2022 Release solution
       shell: pwsh
-      env:
-        CL: /WX
-        LINK: /WX
       run: |
+        $warningsAsErrorsTargets = Join-Path $env:RUNNER_TEMP `
+          "jemalloc-warnings-as-errors.targets"
+        $warningsAsErrorsContent = @'
+        <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+          <ItemDefinitionGroup>
+            <ClCompile>
+              <TreatWarningAsError>true</TreatWarningAsError>
+            </ClCompile>
+            <Link>
+              <TreatLinkerWarningAsErrors>true</TreatLinkerWarningAsErrors>
+            </Link>
+          </ItemDefinitionGroup>
+        </Project>
+        '@
+        $warningsAsErrorsContent | Set-Content -Path $warningsAsErrorsTargets
+
         msbuild msvc/jemalloc_vc2022.sln `
           /m `
           /p:Configuration=Release `
           /p:Platform=x64 `
-          /p:TreatWarningAsError=true `
-          /p:TreatLinkerWarningAsErrors=true
-"""
+          /p:ForceImportBeforeCppTargets="$warningsAsErrorsTargets"
+""".rstrip()
 
 
 def generate_freebsd_job(arch):
@@ -1003,7 +1015,8 @@ def main():
             generate_windows_job(AMD64),
             generate_windows_msbuild_job(),
         ))
-        print(GITHUB_ACTIONS_TEMPLATE.format(name='Windows CI', jobs=jobs))
+        print(GITHUB_ACTIONS_TEMPLATE.format(name='Windows CI', jobs=jobs),
+              end='')
 
     elif workflow_type == 'freebsd':
         jobs = generate_freebsd_job(AMD64)
