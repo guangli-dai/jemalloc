@@ -8,7 +8,11 @@
  */
 #define expect_p_eq expect_ptr_eq
 
-#ifdef _MSC_VER
+/*
+ * The MSVC backend represents pointer atomics with an integer.  clang-cl also
+ * defines _MSC_VER, but can select a GCC-style pointer representation instead.
+ */
+#ifdef JEMALLOC_MSVC_ATOMICS
 #  define TEST_INIT_p(value) ((intptr_t)(value))
 #else
 #  define TEST_INIT_p(value) (value)
